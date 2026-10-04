@@ -33,7 +33,7 @@ const delGoal    = db.query("DELETE FROM goals WHERE month_key = $key");
 
 // ── Google Calendar ───────────────────────────────────────────
 const TOKENS_FILE = "./gcal-tokens.json";
-const GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"];
+const GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar.events"];
 
 function makeOAuth2() {
   const port = process.env.PORT ?? "3003";
@@ -94,6 +94,30 @@ function json(data: unknown, status = 200) {
 
 async function readBody(req: Request) {
   try { return await req.json(); } catch { return {}; }
+}
+
+// ── GCal Time Parser ─────────────────────────────────────────
+function parseEventTime(date: string, timeStr?: string) {
+  if (!timeStr || !timeStr.trim()) return { start: { date }, end: { date } };
+  const t = timeStr.trim().toLowerCase();
+  let h = 0, m = 0;
+  const m12 = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+  const m24 = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (m12) {
+    h = parseInt(m12[1]); m = parseInt(m12[2] || "0");
+    if (m12[3] === "pm" && h !== 12) h += 12;
+    if (m12[3] === "am" && h === 12) h = 0;
+  } else if (m24) {
+    h = parseInt(m24[1]); m = parseInt(m24[2]);
+  } else {
+    return { start: { date }, end: { date } };
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const tz = "America/New_York";
+  return {
+    start: { dateTime: `${date}T${pad(h)}:${pad(m)}:00`, timeZone: tz },
+    end:   { dateTime: `${date}T${pad(h < 23 ? h + 1 : 23)}:${pad(m)}:00`, timeZone: tz },
+  };
 }
 
 // ── API ───────────────────────────────────────────────────────
@@ -206,6 +230,61 @@ async function api(req: Request, url: URL): Promise<Response> {
       const me = await calendar.calendarList.get({ calendarId: "primary" });
       return json({ connected: true, email: me.data.summary || me.data.id });
     } catch { return json({ connected: false }); }
+  }
+
+  // ── GCal Create ─────────────────────────────────────────────
+  if (p === "/api/gcal/create" && m === "POST") {
+    const tokens = loadTokens();
+    if (!tokens) return json({ error: "Not connected" }, 401);
+    try {
+      const { date, title, time } = await readBody(req);
+      const oauth2 = makeOAuth2();
+      oauth2.setCredentials(tokens);
+      oauth2.on("tokens", (t) => saveTokens({ ...loadTokens(), ...t } as Record<string, unknown>));
+      const calendar = google.calendar({ version: "v3", auth: oauth2 });
+      const timing = parseEventTime(date, time);
+      const event = await calendar.events.insert({
+        calendarId: "primary",
+        requestBody: { summary: title, ...timing },
+      });
+      return json({ gcalId: event.data.id });
+    } catch (e) { return json({ error: String(e) }, 500); }
+  }
+
+  // ── GCal Delete ──────────────────────────────────────────────
+  if (p.startsWith("/api/gcal/delete/") && m === "DELETE") {
+    const tokens = loadTokens();
+    if (!tokens) return json({ error: "Not connected" }, 401);
+    try {
+      const gcalId = decodeURIComponent(p.slice("/api/gcal/delete/".length));
+      const oauth2 = makeOAuth2();
+      oauth2.setCredentials(tokens);
+      oauth2.on("tokens", (t) => saveTokens({ ...loadTokens(), ...t } as Record<string, unknown>));
+      const calendar = google.calendar({ version: "v3", auth: oauth2 });
+      await calendar.events.delete({ calendarId: "primary", eventId: gcalId });
+      return json({ ok: true });
+    } catch (e) { return json({ error: String(e) }, 500); }
+  }
+
+  // ── GCal Update ──────────────────────────────────────────────
+  if (p.startsWith("/api/gcal/update/") && m === "PATCH") {
+    const tokens = loadTokens();
+    if (!tokens) return json({ error: "Not connected" }, 401);
+    try {
+      const gcalId = decodeURIComponent(p.slice("/api/gcal/update/".length));
+      const { title, date, time } = await readBody(req);
+      const oauth2 = makeOAuth2();
+      oauth2.setCredentials(tokens);
+      oauth2.on("tokens", (t) => saveTokens({ ...loadTokens(), ...t } as Record<string, unknown>));
+      const calendar = google.calendar({ version: "v3", auth: oauth2 });
+      const timing = parseEventTime(date, time);
+      await calendar.events.patch({
+        calendarId: "primary",
+        eventId: gcalId,
+        requestBody: { summary: title, ...timing },
+      });
+      return json({ ok: true });
+    } catch (e) { return json({ error: String(e) }, 500); }
   }
 
   // ── GCal Sync ────────────────────────────────────────────────

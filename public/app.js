@@ -19,10 +19,93 @@ const FRIEND_COLORS = ['#5EBF8A','#E8884A','#B07FD8','#78AADC','#E87878','#c8a84
 let allEvents = {}, goalsData = {}, friendsList = [];
 let selKey = null, selCat = 'other', selFriendId = null, isFriend = true, viewStart = 0;
 let activeTab = 'calendar', editingPlanIdx = null;
-let gcalConnected = false, gcalEmail = null;
+let gcalConnected = false, gcalEmail = null, gcalByDate = {};
+let lastViewStart = -1;
 const suggCache = {};
 const now = new Date();
 const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+// ── Animations ────────────────────────────────────────────────
+function countUp(el, target, dur = 700) {
+  if (!el) return;
+  const start = performance.now();
+  const from = parseInt(el.textContent) || 0;
+  const tick = (now) => {
+    const p = Math.min(1, (now - start) / dur);
+    const ease = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(from + (target - from) * ease);
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function addRipple(tile, e) {
+  const r = document.createElement('div');
+  r.className = 'ripple';
+  const rect = tile.getBoundingClientRect();
+  r.style.left = `${e.clientX - rect.left}px`;
+  r.style.top = `${e.clientY - rect.top}px`;
+  tile.appendChild(r);
+  setTimeout(() => r.remove(), 600);
+}
+
+function initLeaves() {
+  const canvas = document.getElementById('leaves-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const COLORS = ['#E8884A','#c8a84b','#E87878','#5EBF8A','#B07FD8'];
+  let W, H, leaves = [];
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  for (let i = 0; i < 22; i++) {
+    leaves.push({
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
+      size: 3.5 + Math.random() * 5,
+      vy: 0.35 + Math.random() * 0.65,
+      vx: (Math.random() - 0.5) * 0.5,
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 0.025,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      alpha: 0.25 + Math.random() * 0.3,
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    leaves.forEach(l => {
+      l.y += l.vy; l.x += l.vx; l.rot += l.rotV;
+      if (l.y > H + 10) { l.y = -10; l.x = Math.random() * W; }
+      if (l.x < -10) l.x = W + 10;
+      if (l.x > W + 10) l.x = -10;
+      ctx.save();
+      ctx.translate(l.x, l.y);
+      ctx.rotate(l.rot);
+      ctx.globalAlpha = l.alpha;
+      ctx.fillStyle = l.color;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, l.size, l.size * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    });
+    requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+function initParallax() {
+  const bg = document.getElementById('bg');
+  if (!bg) return;
+  window.addEventListener('scroll', () => {
+    bg.style.transform = `scale(1.06) translateY(${window.scrollY * 0.25}px)`;
+  }, { passive: true });
+}
 
 // ── API ───────────────────────────────────────────────────────
 async function api(path, method = 'GET', body) {
@@ -40,10 +123,11 @@ async function loadAll() {
     api('/api/goals'),
   ]);
   allEvents = evts || {};
+  Object.keys(allEvents).forEach(k => { allEvents[k] = sortPlans(allEvents[k]); });
   friendsList = frnds || [];
   goalsData = goals || {};
   renderAll();
-  // GCal status check (non-blocking)
+  // GCal status + live events (non-blocking)
   fetch('/api/gcal/status').then(r => r.json()).then(s => {
     gcalConnected = s.connected || false;
     gcalEmail = s.email || null;
@@ -52,6 +136,7 @@ async function loadAll() {
       history.replaceState(null, '', '/');
       showGCalSync();
     }
+    if (gcalConnected) refreshGCalEvents();
   }).catch(() => {});
 }
 
@@ -113,10 +198,71 @@ function catBreakdown() {
 }
 
 // ── Persist ───────────────────────────────────────────────────
+function timeToMinutes(t) {
+  if (!t) return 9999;
+  const s = t.trim().toLowerCase().replace(/\s+/g, '');
+  // "5:00am", "10:30pm", "2pm", "9am"
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)?$/);
+  if (!m) return 9999;
+  let h = parseInt(m[1]), min = parseInt(m[2] || '0');
+  const ampm = m[3];
+  if (ampm === 'pm' && h !== 12) h += 12;
+  if (ampm === 'am' && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function sortPlans(plans) {
+  return [...plans].sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+}
+
 async function persistDay(key, plans) {
-  allEvents[key] = plans;
-  await api(`/api/events/${key}`, 'PUT', { plans });
+  const sorted = sortPlans(plans);
+  const oldPlans = allEvents[key] || [];
+  allEvents[key] = sorted;
+  await api(`/api/events/${key}`, 'PUT', { plans: sorted });
   renderAll();
+  if (sorted.length > 0) {
+    const tiles = document.querySelectorAll('.tile.success');
+    tiles.forEach(t => {
+      if (t.querySelector('.dn')?.textContent === String(parseInt(key.slice(8)))) {
+        t.classList.remove('pulse-in'); void t.offsetWidth; t.classList.add('pulse-in');
+      }
+    });
+  }
+  if (gcalConnected) syncDayToGCal(key, oldPlans, sorted);
+}
+
+async function syncDayToGCal(key, oldPlans, newPlans) {
+  // Delete removed app-created events
+  for (const op of oldPlans) {
+    if (!op.gcalCreated || !op.gcalId) continue;
+    if (!newPlans.some(np => np.gcalId === op.gcalId)) {
+      try { await api(`/api/gcal/delete/${encodeURIComponent(op.gcalId)}`, 'DELETE'); } catch {}
+    }
+  }
+
+  // Create new plans / update changed ones
+  const current = [...(allEvents[key] || [])];
+  let changed = false;
+  for (let i = 0; i < current.length; i++) {
+    const p = current[i];
+    if (!p.gcalId) {
+      try {
+        const res = await api('/api/gcal/create', 'POST', { date: key, title: p.name, time: p.time });
+        if (res.gcalId) { current[i] = { ...p, gcalId: res.gcalId, gcalCreated: true }; changed = true; }
+      } catch {}
+    } else if (p.gcalCreated) {
+      const oldP = oldPlans.find(op => op.gcalId === p.gcalId);
+      if (oldP && (oldP.name !== p.name || oldP.time !== p.time)) {
+        try { await api(`/api/gcal/update/${encodeURIComponent(p.gcalId)}`, 'PATCH', { title: p.name, date: key, time: p.time }); } catch {}
+      }
+    }
+  }
+
+  if (changed) {
+    allEvents[key] = sortPlans(current);
+    await api(`/api/events/${key}`, 'PUT', { plans: allEvents[key] });
+  }
 }
 
 async function persistGoal(m, target) {
@@ -137,10 +283,12 @@ function updateStats() {
       if (!isPast(Y, mo, d)) remain++;
     }
   }
-  document.getElementById('stat-success').textContent = success;
-  document.getElementById('stat-plans').textContent = total;
-  document.getElementById('stat-remain').textContent = remain;
-  const se = document.getElementById('stat-streak'); if (se) se.textContent = calcStreak();
+  countUp(document.getElementById('stat-success'), success);
+  countUp(document.getElementById('stat-plans'), total);
+  countUp(document.getElementById('stat-remain'), remain);
+  const streak = calcStreak();
+  const se = document.getElementById('stat-streak');
+  if (se) { countUp(se, streak); se.classList.toggle('streak-fire', streak >= 3); }
   const gapEl = document.getElementById('gap-alert');
   if (gapEl) {
     const gaps = calcGaps();
@@ -156,6 +304,8 @@ function updateStats() {
 // ── Calendar ──────────────────────────────────────────────────
 function renderCalendar() {
   const container = document.getElementById('months');
+  const slideDir = viewStart > lastViewStart ? 'months-slide' : viewStart < lastViewStart ? 'months-slide-left' : null;
+  lastViewStart = viewStart;
   container.innerHTML = '';
   MONTHS.slice(viewStart, viewStart + 2).forEach(({ m, name }) => {
     const block = document.createElement('div'); block.className = 'month-block';
@@ -165,7 +315,8 @@ function renderCalendar() {
     if (goal > 0) {
       const pct = Math.min(100, Math.round((done / goal) * 100));
       const gw = document.createElement('div'); gw.className = 'goal-wrap';
-      gw.innerHTML = `<div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div><div class="goal-label">${done}/${goal}</div>`;
+      gw.innerHTML = `<div class="goal-bar"><div class="goal-fill" style="width:0%"></div></div><div class="goal-label">${done}/${goal}</div>`;
+      requestAnimationFrame(() => { const f = gw.querySelector('.goal-fill'); if (f) f.style.width = `${pct}%`; });
       mhd.appendChild(gw);
     }
     const gset = document.createElement('button'); gset.className = 'goal-set-btn';
@@ -182,16 +333,22 @@ function renderCalendar() {
     const firstDay = new Date(Y, m, 1).getDay(), daysInMonth = new Date(Y, m + 1, 0).getDate();
     for (let i = 0; i < firstDay; i++) { const e = document.createElement('div'); e.className = 'tile empty'; grid.appendChild(e); }
     for (let d = 1; d <= daysInMonth; d++) {
+      const slot = firstDay + d - 1, row = Math.floor(slot / 7);
       const key = dayKey(Y, m, d), plans = allEvents[key] || [];
       const past = isPast(Y, m, d), today = isToday(Y, m, d);
       const hasFriend = plans.some(p => p.friend && isConfirmed(p));
-      const tile = document.createElement('div'); tile.className = 'tile';
+      const tile = document.createElement('div'); tile.className = 'tile stagger';
+      tile.style.animationDelay = `${row * 35}ms`;
       if (past) tile.classList.add('past');
       if (today) tile.classList.add('today');
       if (plans.length > 0) tile.classList.add('success');
       if (selKey === key) tile.classList.add('selected');
       const dn = document.createElement('div'); dn.className = 'dn'; dn.textContent = d; tile.appendChild(dn);
-      if (plans.length > 0) {
+      const gcalEvts = gcalByDate[key] || [];
+      const importedIds = new Set((allEvents[key] || []).map(p => p.gcalId).filter(Boolean));
+      const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
+      if (unimported.length > 0 && plans.length === 0) tile.classList.add('gcal-only');
+      if (plans.length > 0 || unimported.length > 0) {
         const dots = document.createElement('div'); dots.className = 'dots';
         plans.slice(0, 4).forEach(p => {
           const cat = CATS.find(c => c.id === p.cat) || CATS[4];
@@ -200,9 +357,16 @@ function renderCalendar() {
           dot.style.background = past ? 'rgba(255,255,255,0.18)' : cat.hex;
           dots.appendChild(dot);
         });
+        unimported.slice(0, 3).forEach(() => {
+          const dot = document.createElement('div'); dot.className = 'dot';
+          dot.style.background = past ? 'rgba(255,255,255,0.12)' : 'rgba(160,200,255,0.7)';
+          dot.style.border = past ? 'none' : '1px solid rgba(160,200,255,0.9)';
+          dots.appendChild(dot);
+        });
         tile.appendChild(dots);
       }
-      if (!past) tile.addEventListener('click', () => {
+      if (!past) tile.addEventListener('click', (e) => {
+        addRipple(tile, e);
         if (selKey === key) { selKey = null; closePanel(); renderCalendar(); }
         else selectDay(key);
       });
@@ -210,6 +374,7 @@ function renderCalendar() {
     }
     block.appendChild(grid); container.appendChild(block);
   });
+  if (slideDir) { container.classList.remove('months-slide','months-slide-left'); void container.offsetWidth; container.classList.add(slideDir); }
   document.getElementById('nav-prev').disabled = viewStart === 0;
   document.getElementById('nav-next').disabled = viewStart === 1;
   document.getElementById('nav-range').textContent = MONTHS.slice(viewStart, viewStart + 2).map(x => x.label).join(' – ');
@@ -218,6 +383,7 @@ function renderCalendar() {
 function renderAll() {
   if (activeTab === 'friends') { renderFriendsBoard(); updateStats(); return; }
   if (activeTab === 'breakdown') { renderBreakdown(); updateStats(); return; }
+  if (activeTab === 'insights') { renderInsights(); updateStats(); return; }
   renderCalendar(); updateStats(); if (selKey) renderPanel(selKey);
 }
 
@@ -257,7 +423,7 @@ function renderPanel(key) {
     plans.forEach((p, i) => {
       const cat = CATS.find(c => c.id === p.cat) || CATS[4];
       const conf = isConfirmed(p);
-      html += `<div class="plan-item${conf ? '' : ' plan-tentative'}">
+      html += `<div class="plan-item${conf ? '' : ' plan-tentative'}" style="animation-delay:${i * 55}ms">
         <div class="plan-dot" style="background:${cat.hex};${conf ? '' : 'opacity:0.45'}"></div>
         <div class="plan-info">
           <div class="plan-name">${p.name}</div>
@@ -278,6 +444,29 @@ function renderPanel(key) {
     });
   }
   html += `</div>`;
+
+  // GCal live events for this day
+  const gcalEvts = gcalByDate[key] || [];
+  const importedIds = new Set(plans.map(p => p.gcalId).filter(Boolean));
+  const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
+  const imported = gcalEvts.filter(e => importedIds.has(e.id));
+  if (gcalEvts.length > 0) {
+    html += `<div class="plans-section"><div class="section-label" style="color:rgba(160,200,255,0.6)">From Google Calendar</div>`;
+    gcalEvts.forEach(ev => {
+      const isImported = importedIds.has(ev.id);
+      const timeStr = ev.allDay ? 'all day' : (ev.start ? `${ev.start}${ev.end ? '–'+ev.end : ''}` : '');
+      html += `<div class="plan-item" style="opacity:${isImported?'0.45':'1'}">
+        <div class="plan-dot" style="background:rgba(160,200,255,${isImported?'0.3':'0.8'});flex-shrink:0"></div>
+        <div class="plan-info">
+          <div class="plan-name" style="color:${isImported?'var(--ink-3)':'var(--ink)'}">${ev.summary}</div>
+          ${timeStr ? `<div class="plan-meta">${timeStr}</div>` : ''}
+          ${isImported ? `<div class="plan-meta" style="color:rgba(94,191,138,0.5)">✓ added to plans</div>` : ''}
+        </div>
+        ${!isImported && !past ? `<button class="gcal-quick-add plan-edit" data-gcal-id="${ev.id}" data-gcal-summary="${ev.summary.replace(/"/g,'&quot;')}" data-gcal-time="${timeStr==='all day'?'':timeStr}" data-key="${key}" title="Add to plans" style="font-size:11px;color:rgba(160,200,255,0.7)">+</button>` : ''}
+      </div>`;
+    });
+    html += `</div>`;
+  }
 
   if (editingPlanIdx !== null && !past) {
     const ep = plans[editingPlanIdx];
@@ -372,6 +561,18 @@ function attachPanelEvents(key, plans, past) {
 
   panel.querySelectorAll('.friend-chip').forEach(btn => {
     btn.addEventListener('click', () => { selFriendId = btn.dataset.fid || null; renderPanel(key); });
+  });
+
+  panel.querySelectorAll('.gcal-quick-add').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { gcalId, gcalSummary, gcalTime, key: k } = btn.dataset;
+      const arr = [...(allEvents[k] || [])];
+      if (arr.some(p => p.gcalId === gcalId)) return;
+      const plan = { name: gcalSummary, cat: 'other', friend: false, confirmed: true, gcalId };
+      if (gcalTime) plan.time = gcalTime;
+      arr.push(plan);
+      await persistDay(k, arr);
+    });
   });
 
   const fcb = panel.querySelector('#friend-cb');
@@ -499,13 +700,32 @@ async function generateRecap(panel) {
 }
 
 // ── Google Calendar ───────────────────────────────────────────
+async function refreshGCalEvents(silent = true) {
+  const btn = document.getElementById('gcal-btn');
+  if (!silent && btn) { btn.textContent = '⟳ Syncing…'; btn.disabled = true; }
+  try {
+    const res = await fetch('/api/gcal/events');
+    const data = await res.json();
+    if (data.byDate) {
+      gcalByDate = data.byDate;
+      renderAll();
+      if (selKey) renderPanel(selKey);
+    }
+  } catch {}
+  if (!silent) updateGCalBtn();
+}
+
 function updateGCalBtn() {
   const btn = document.getElementById('gcal-btn');
   if (!btn) return;
+  btn.disabled = false;
   if (gcalConnected) {
     btn.textContent = `⟳ GCal${gcalEmail ? ': ' + gcalEmail.split('@')[0] : ''}`;
-    btn.title = `Sync from ${gcalEmail || 'Google Calendar'}`;
-    btn.onclick = showGCalSync;
+    btn.title = 'Click to refresh · Long-press to import';
+    btn.onclick = async () => {
+      await refreshGCalEvents(false);
+    };
+    btn.ondblclick = (e) => { e.preventDefault(); showGCalSync(); };
   } else {
     btn.textContent = '+ GCal';
     btn.title = 'Connect Google Calendar';
@@ -768,6 +988,143 @@ function runTests() {
   document.body.appendChild(modal);
 }
 
+// ── Insights ──────────────────────────────────────────────────
+const INSIGHTS_RECS = [
+  {
+    icon: '🏐', title: 'Book indoor volleyball for November',
+    why: 'Grass VB at Prospect Park + Clinton Cove appeared 10+ times this summer. Cold ends outdoor season — reserve a gym court before spots fill.',
+    cat: 'other', suggestDate: '2026-11-07', planName: 'Indoor Volleyball'
+  },
+  {
+    icon: '☕', title: 'Lock in monthly Nicole brunch',
+    why: 'Brunch with Nicole is already a genuine recurring pattern. Make it official — first Sunday of each month.',
+    cat: 'other', suggestDate: '2026-10-04', planName: 'Brunch with Nicole'
+  },
+  {
+    icon: '🍂', title: 'Catskills or Hudson Valley weekend',
+    why: 'Post-Europe trip you had a low-key stretch. A fall weekend trip with Kwan / Sally / Gayoon fits the season and your travel pattern.',
+    cat: 'upstate', suggestDate: '2026-10-17', planName: 'Catskills Weekend Trip'
+  },
+  {
+    icon: '🎧', title: "Track Ray's fall DJ set schedule",
+    why: "Ray sets appeared 4+ times in your calendar (Slate, Mr. Purple). Add proactively as they're announced — you always go.",
+    cat: 'other', suggestDate: null, planName: "Ray DJ Set"
+  },
+  {
+    icon: '🖼', title: '1 museum day per month',
+    why: 'You hit Guggenheim, MoMA PS1, and New Museum this summer. Fall brings strong new exhibitions — block one Sunday/month.',
+    cat: 'other', suggestDate: '2026-10-11', planName: 'Museum Day'
+  },
+  {
+    icon: '🥧', title: 'Plan Friendsgiving by Oct 15',
+    why: 'Your hosting + gathering patterns say you\'d naturally do one. Popular dates fill fast — lock down venue or apartment plan early.',
+    cat: 'friendsgiving', suggestDate: '2026-11-21', planName: 'Friendsgiving'
+  },
+  {
+    icon: '🎃', title: 'Halloween: plan 2 weeks out',
+    why: 'Halloweekend Oct 30 is already on your calendar but your parties are always packed. Costume + logistics need a 2-week runway.',
+    cat: 'halloween', suggestDate: '2026-10-30', planName: 'Halloween Party'
+  },
+];
+
+function renderInsights() {
+  const panel = document.getElementById('panel');
+
+  // Dynamic stats
+  const freq = friendFrequency();
+  const bd = catBreakdown();
+  let success = 0, total = 0;
+  for (let mo = 8; mo <= 10; mo++) {
+    const days = new Date(Y, mo + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const p = allEvents[dayKey(Y,mo,d)] || [];
+      total += p.length;
+      if (p.some(x => x.friend && isConfirmed(x))) success++;
+    }
+  }
+  const topFriends = freq.slice(0, 5);
+  const topCat = CATS.find(c => c.id === Object.entries(bd).sort((a,b)=>b[1]-a[1])[0]?.[0]);
+
+  let html = `<div class="panel-head"><div class="panel-date">✦ Insights</div><div class="panel-dow">Based on your last 4 months</div></div>`;
+
+  // Patterns strip
+  html += `<div style="display:flex;flex-direction:column;gap:6px">
+    <div class="section-label">Your patterns</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">
+      <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:7px 9px">
+        <div style="font-size:16px;font-weight:700;color:var(--accent)">${success}</div>
+        <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em">Success Days</div>
+      </div>
+      <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:7px 9px">
+        <div style="font-size:16px;font-weight:700;color:var(--accent)">${total}</div>
+        <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em">Plans This Fall</div>
+      </div>
+    </div>`;
+
+  if (topFriends.length) {
+    html += `<div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:8px 10px">
+      <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Top Crew</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">`;
+    topFriends.forEach(([name, count]) => {
+      const f = friendsList.find(x => x.name === name);
+      html += `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${f?.color||'#78AADC'}22;border:1px solid ${f?.color||'#78AADC'}44;color:${f?.color||'#78AADC'}">${name} <span style="opacity:0.6">${count}x</span></span>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // Known patterns from analysis
+  html += `<div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:8px 10px">
+    <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Summer habits</div>
+    <div style="display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--ink-2);line-height:1.5">
+      <div>🏐 Volleyball at Prospect Park + Clinton Cove (10× this summer)</div>
+      <div>🎧 Ray DJ sets — Slate, Mr. Purple (4× recurring)</div>
+      <div>☕ Monthly Nicole brunch (already a pattern)</div>
+      <div>✈️ Big traveler — Lollapalooza + 12-day Europe trip</div>
+      <div>🎂 ~3-4 birthday events every month — you never miss one</div>
+    </div>
+  </div>
+  </div>`;
+
+  // Recommendations
+  html += `<div style="display:flex;flex-direction:column;gap:5px"><div class="section-label" style="margin-top:4px">Smart recommendations</div>`;
+  INSIGHTS_RECS.forEach(rec => {
+    const cat = CATS.find(c => c.id === rec.cat) || CATS[4];
+    const alreadyPlanned = rec.suggestDate && (allEvents[rec.suggestDate] || []).some(p => p.name === rec.planName);
+    html += `<div style="background:rgba(255,255,255,0.03);border:1px solid ${alreadyPlanned ? 'rgba(94,191,138,0.3)' : 'var(--border)'};border-radius:8px;padding:9px 10px">
+      <div style="display:flex;align-items:flex-start;gap:7px">
+        <span style="font-size:15px;flex-shrink:0;margin-top:1px">${rec.icon}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11.5px;font-weight:600;color:var(--ink);margin-bottom:3px">${rec.title}</div>
+          <div style="font-size:10px;color:var(--ink-3);line-height:1.4;margin-bottom:6px">${rec.why}</div>
+          ${alreadyPlanned
+            ? `<span style="font-size:9.5px;color:rgba(94,191,138,0.7);font-weight:600">✓ Already planned</span>`
+            : rec.suggestDate
+              ? `<button class="insight-plan-btn" data-date="${rec.suggestDate}" data-name="${rec.planName.replace(/"/g,'&quot;')}" data-cat="${rec.cat}" style="font-size:10px;font-weight:600;padding:3px 10px;border-radius:20px;border:1px solid ${cat.hex}55;background:${cat.hex}15;color:${cat.hex};cursor:pointer">+ Add to ${rec.suggestDate.slice(5).replace('-','/')}</button>`
+              : `<span style="font-size:9.5px;color:var(--ink-3)">Add when announced</span>`
+          }
+        </div>
+      </div>
+    </div>`;
+  });
+  html += `</div>`;
+
+  panel.innerHTML = html;
+
+  panel.querySelectorAll('.insight-plan-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { date, name, cat } = btn.dataset;
+      const arr = [...(allEvents[date] || [])];
+      arr.push({ name, cat, friend: true, confirmed: false });
+      await persistDay(date, arr);
+      btn.textContent = '✓ Added';
+      btn.style.color = '#5EBF8A';
+      btn.style.borderColor = 'rgba(94,191,138,0.4)';
+      btn.style.background = 'rgba(94,191,138,0.1)';
+      btn.disabled = true;
+    });
+  });
+}
+
 // ── Nav ───────────────────────────────────────────────────────
 document.getElementById('nav-prev').addEventListener('click', () => { if (viewStart > 0) { viewStart--; renderCalendar(); } });
 document.getElementById('nav-next').addEventListener('click', () => { if (viewStart < 1) { viewStart++; renderCalendar(); } });
@@ -781,6 +1138,7 @@ document.getElementById('tab-row').querySelectorAll('.tab-btn').forEach(btn => {
     if (mw) mw.style.display = activeTab === 'calendar' ? '' : 'none';
     if (activeTab === 'friends') { renderFriendsBoard(); openPanel(); }
     else if (activeTab === 'breakdown') { renderBreakdown(); openPanel(); }
+    else if (activeTab === 'insights') { renderInsights(); openPanel(); }
     else {
       if (selKey) { renderPanel(selKey); openPanel(); }
       else { closePanel(); document.getElementById('panel').innerHTML = '<div class="panel-empty"><div class="panel-empty-icon">🍂</div><div class="panel-empty-text">Pick a day to plan something</div></div>'; }
@@ -793,5 +1151,7 @@ document.querySelectorAll('.export-btn').forEach(btn => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────
-updateGCalBtn(); // set click handler immediately (default: not connected)
+updateGCalBtn();
+initLeaves();
+initParallax();
 loadAll().catch(err => console.error('Load failed:', err));
