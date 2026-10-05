@@ -774,6 +774,15 @@ async function showGCalSync() {
   const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const MO_NAMES = { '09': 'Sep', '10': 'Oct', '11': 'Nov' };
 
+  // Build eventId → dates map for multi-day detection
+  const eventDates = {};
+  Object.entries(gcalData).forEach(([date, evts]) => {
+    evts.forEach(ev => {
+      if (!eventDates[ev.id]) eventDates[ev.id] = { dates: [], summary: ev.summary };
+      if (!eventDates[ev.id].dates.includes(date)) eventDates[ev.id].dates.push(date);
+    });
+  });
+
   let html = '';
   let lastMo = '';
   dates.forEach(date => {
@@ -804,12 +813,17 @@ async function showGCalSync() {
       });
       html += `</div>`;
     }
-    // GCal events
+    // GCal events (skip multi-day duplicates — only show on first/earliest date)
     gcalData[date].forEach(ev => {
-      const alreadyImported = existingGcalIds.has(ev.id);
-      const timeStr = ev.allDay ? 'all day' : (ev.start ? `${ev.start}${ev.end ? '–'+ev.end : ''}` : '');
+      const firstDate = eventDates[ev.id]?.dates[0];
+      if (firstDate && firstDate !== date) return; // show only on first day
+      const spanDatesForCheck = eventDates[ev.id]?.dates || [date];
+      const alreadyImported = spanDatesForCheck.every(d => (allEvents[d]||[]).some(p => p.gcalId === ev.id));
+      const spanDates = eventDates[ev.id]?.dates || [];
+      const isMultiDay = spanDates.length > 1;
+      const timeStr = ev.allDay ? (isMultiDay ? `${spanDates[0].slice(5).replace('-','/')}–${spanDates[spanDates.length-1].slice(5).replace('-','/')}` : 'all day') : (ev.start ? `${ev.start}${ev.end ? '–'+ev.end : ''}` : '');
       html += `<label style="display:flex;align-items:center;gap:8px;padding:3px 0;cursor:${alreadyImported?'default':'pointer'};opacity:${alreadyImported?'0.38':'1'}">
-        <input type="checkbox" data-date="${date}" data-id="${ev.id}" data-summary="${ev.summary.replace(/"/g,'&quot;')}" data-time="${timeStr==='all day'?'':timeStr}" ${alreadyImported?'checked disabled':'checked'} style="accent-color:#5EBF8A;width:13px;height:13px;flex-shrink:0">
+        <input type="checkbox" data-date="${date}" data-id="${ev.id}" data-summary="${ev.summary.replace(/"/g,'&quot;')}" data-time="${ev.allDay?'':ev.start||''}" ${alreadyImported?'checked disabled':'checked'} style="accent-color:#5EBF8A;width:13px;height:13px;flex-shrink:0">
         <span style="font-size:11.5px;color:#e8eaf0;flex:1">${ev.summary}</span>
         ${timeStr ? `<span style="font-size:10px;color:rgba(232,234,240,0.35);flex-shrink:0">${timeStr}</span>` : ''}
         ${alreadyImported ? `<span style="font-size:9px;color:rgba(94,191,138,0.5);flex-shrink:0">imported</span>` : ''}
@@ -832,15 +846,22 @@ async function showGCalSync() {
     const checked = [...body.querySelectorAll('input[type=checkbox]:checked:not([disabled])')];
     if (!checked.length) return;
     importBtn.disabled = true; importBtn.textContent = 'Importing…';
+    const seenIds = new Set();
     for (const cb of checked) {
-      const { date, id, summary, time } = cb.dataset;
-      const existing = [...(allEvents[date] || [])];
-      if (existing.some(p => p.gcalId === id)) continue;
-      const plan = { name: summary, cat: 'other', friend: false, confirmed: true, gcalId: id };
-      if (time) plan.time = time;
-      existing.push(plan);
-      allEvents[date] = existing;
-      await api(`/api/events/${date}`, 'PUT', { plans: existing });
+      const { id, summary, time } = cb.dataset;
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      // Import on all dates the event spans (handles multi-day events)
+      const allDates = eventDates[id]?.dates || [cb.dataset.date];
+      for (const date of allDates) {
+        const existing = [...(allEvents[date] || [])];
+        if (existing.some(p => p.gcalId === id)) continue;
+        const plan = { name: summary, cat: 'other', friend: false, confirmed: true, gcalId: id };
+        if (time) plan.time = time;
+        existing.push(plan);
+        allEvents[date] = existing;
+        await api(`/api/events/${date}`, 'PUT', { plans: existing });
+      }
     }
     renderAll();
     overlay.remove();
@@ -1030,9 +1051,7 @@ const INSIGHTS_RECS = [
 function renderInsights() {
   const panel = document.getElementById('panel');
 
-  // Dynamic stats
   const freq = friendFrequency();
-  const bd = catBreakdown();
   let success = 0, total = 0;
   for (let mo = 8; mo <= 10; mo++) {
     const days = new Date(Y, mo + 1, 0).getDate();
@@ -1043,69 +1062,93 @@ function renderInsights() {
     }
   }
   const topFriends = freq.slice(0, 5);
-  const topCat = CATS.find(c => c.id === Object.entries(bd).sort((a,b)=>b[1]-a[1])[0]?.[0]);
+  const streak = calcStreak();
 
-  let html = `<div class="panel-head"><div class="panel-date">✦ Insights</div><div class="panel-dow">Based on your last 4 months</div></div>`;
+  const HABITS = [
+    ['🏐','Volleyball','Prospect Park + Clinton Cove · 10×'],
+    ['🎧','Ray DJ sets','Slate, Mr. Purple · 4 nights'],
+    ['☕','Nicole brunch','Monthly · already a pattern'],
+    ['✈️','Big trips','Lollapalooza + 12-day Europe'],
+    ['🎂','Birthdays','3–4/month · you never miss one'],
+  ];
 
-  // Patterns strip
-  html += `<div style="display:flex;flex-direction:column;gap:6px">
-    <div class="section-label">Your patterns</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">
-      <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:7px 9px">
-        <div style="font-size:16px;font-weight:700;color:var(--accent)">${success}</div>
-        <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em">Success Days</div>
-      </div>
-      <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:7px 9px">
-        <div style="font-size:16px;font-weight:700;color:var(--accent)">${total}</div>
-        <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em">Plans This Fall</div>
-      </div>
-    </div>`;
+  let html = `<div style="display:flex;flex-direction:column;gap:14px;padding-bottom:12px">`;
 
+  // Header
+  html += `<div style="border-bottom:1px solid var(--border);padding-bottom:10px">
+    <div style="font-size:15px;font-weight:800;color:var(--ink);letter-spacing:-0.02em">✦ Insights</div>
+    <div style="font-size:9.5px;color:var(--ink-3);margin-top:2px">Summer analysis · fall recommendations</div>
+  </div>`;
+
+  // Stats 3-up
+  html += `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px">
+    <div style="background:rgba(94,191,138,0.08);border:1px solid rgba(94,191,138,0.22);border-radius:8px;padding:8px 6px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:var(--accent);line-height:1">${success}</div>
+      <div style="font-size:7.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:3px">Wins</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;padding:8px 6px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:var(--ink);line-height:1">${total}</div>
+      <div style="font-size:7.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:3px">Plans</div>
+    </div>
+    <div style="background:${streak>=3?'rgba(255,140,0,0.1)':'rgba(255,255,255,0.04)'};border:1px solid ${streak>=3?'rgba(255,140,0,0.28)':'var(--border)'};border-radius:8px;padding:8px 6px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:${streak>=3?'#FF8C00':'var(--ink)'};line-height:1">${streak}</div>
+      <div style="font-size:7.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:3px">${streak>=3?'🔥 Streak':'Streak'}</div>
+    </div>
+  </div>`;
+
+  // Top crew
   if (topFriends.length) {
-    html += `<div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:8px 10px">
-      <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Top Crew</div>
+    html += `<div>
+      <div class="section-label" style="margin-bottom:7px">Top crew</div>
       <div style="display:flex;flex-wrap:wrap;gap:4px">`;
     topFriends.forEach(([name, count]) => {
       const f = friendsList.find(x => x.name === name);
-      html += `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${f?.color||'#78AADC'}22;border:1px solid ${f?.color||'#78AADC'}44;color:${f?.color||'#78AADC'}">${name} <span style="opacity:0.6">${count}x</span></span>`;
+      const col = f?.color || '#78AADC';
+      html += `<span style="font-size:10.5px;font-weight:600;padding:3px 9px;border-radius:20px;background:${col}18;border:1px solid ${col}33;color:${col}">${name}<span style="opacity:0.5;font-weight:400"> ·${count}</span></span>`;
     });
     html += `</div></div>`;
   }
 
-  // Known patterns from analysis
-  html += `<div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:7px;padding:8px 10px">
-    <div style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Summer habits</div>
-    <div style="display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--ink-2);line-height:1.5">
-      <div>🏐 Volleyball at Prospect Park + Clinton Cove (10× this summer)</div>
-      <div>🎧 Ray DJ sets — Slate, Mr. Purple (4× recurring)</div>
-      <div>☕ Monthly Nicole brunch (already a pattern)</div>
-      <div>✈️ Big traveler — Lollapalooza + 12-day Europe trip</div>
-      <div>🎂 ~3-4 birthday events every month — you never miss one</div>
-    </div>
-  </div>
-  </div>`;
+  // Summer habits
+  html += `<div>
+    <div class="section-label" style="margin-bottom:7px">Your summer habits</div>
+    <div style="display:flex;flex-direction:column;gap:1px;border-radius:9px;overflow:hidden;border:1px solid var(--border)">`;
+  HABITS.forEach(([icon, label, sub], i) => {
+    html += `<div style="display:flex;align-items:center;gap:9px;padding:7px 10px;background:rgba(255,255,255,${i%2===0?'0.02':'0.035'})">
+      <span style="font-size:15px;width:18px;text-align:center;flex-shrink:0">${icon}</span>
+      <div>
+        <div style="font-size:10.5px;font-weight:600;color:var(--ink);line-height:1.3">${label}</div>
+        <div style="font-size:9px;color:var(--ink-3)">${sub}</div>
+      </div>
+    </div>`;
+  });
+  html += `</div></div>`;
 
-  // Recommendations
-  html += `<div style="display:flex;flex-direction:column;gap:5px"><div class="section-label" style="margin-top:4px">Smart recommendations</div>`;
+  // Smart recs
+  html += `<div>
+    <div class="section-label" style="margin-bottom:7px">Smart recs for fall</div>
+    <div style="display:flex;flex-direction:column;gap:5px">`;
   INSIGHTS_RECS.forEach(rec => {
     const cat = CATS.find(c => c.id === rec.cat) || CATS[4];
-    const alreadyPlanned = rec.suggestDate && (allEvents[rec.suggestDate] || []).some(p => p.name === rec.planName);
-    html += `<div style="background:rgba(255,255,255,0.03);border:1px solid ${alreadyPlanned ? 'rgba(94,191,138,0.3)' : 'var(--border)'};border-radius:8px;padding:9px 10px">
-      <div style="display:flex;align-items:flex-start;gap:7px">
-        <span style="font-size:15px;flex-shrink:0;margin-top:1px">${rec.icon}</span>
+    const done = rec.suggestDate && (allEvents[rec.suggestDate] || []).some(p => p.name === rec.planName);
+    html += `<div style="border:1px solid ${done?'rgba(94,191,138,0.3)':'var(--border)'};border-radius:9px;padding:9px 11px;background:${done?'rgba(94,191,138,0.04)':'rgba(255,255,255,0.025)'}">
+      <div style="display:flex;gap:9px;align-items:flex-start">
+        <span style="font-size:17px;flex-shrink:0;line-height:1.15">${rec.icon}</span>
         <div style="flex:1;min-width:0">
-          <div style="font-size:11.5px;font-weight:600;color:var(--ink);margin-bottom:3px">${rec.title}</div>
-          <div style="font-size:10px;color:var(--ink-3);line-height:1.4;margin-bottom:6px">${rec.why}</div>
-          ${alreadyPlanned
-            ? `<span style="font-size:9.5px;color:rgba(94,191,138,0.7);font-weight:600">✓ Already planned</span>`
+          <div style="font-size:11px;font-weight:700;color:${done?'rgba(94,191,138,0.75)':'var(--ink)'};margin-bottom:3px;line-height:1.3">${rec.title}</div>
+          <div style="font-size:9.5px;color:var(--ink-3);line-height:1.45;margin-bottom:${done?'0':'7px'}">${rec.why}</div>
+          ${done
+            ? `<span style="font-size:9px;color:rgba(94,191,138,0.65);font-weight:700">✓ Planned</span>`
             : rec.suggestDate
-              ? `<button class="insight-plan-btn" data-date="${rec.suggestDate}" data-name="${rec.planName.replace(/"/g,'&quot;')}" data-cat="${rec.cat}" style="font-size:10px;font-weight:600;padding:3px 10px;border-radius:20px;border:1px solid ${cat.hex}55;background:${cat.hex}15;color:${cat.hex};cursor:pointer">+ Add to ${rec.suggestDate.slice(5).replace('-','/')}</button>`
-              : `<span style="font-size:9.5px;color:var(--ink-3)">Add when announced</span>`
+              ? `<button class="insight-plan-btn" data-date="${rec.suggestDate}" data-name="${rec.planName.replace(/"/g,'&quot;')}" data-cat="${rec.cat}" style="font-size:9.5px;font-weight:700;padding:3px 11px;border-radius:20px;border:1px solid ${cat.hex}44;background:${cat.hex}12;color:${cat.hex};cursor:pointer">+ ${rec.suggestDate.slice(5).replace('-','/')}</button>`
+              : `<span style="font-size:9px;color:var(--ink-3);font-style:italic">Add when announced</span>`
           }
         </div>
       </div>
     </div>`;
   });
+  html += `</div></div>`;
+
   html += `</div>`;
 
   panel.innerHTML = html;

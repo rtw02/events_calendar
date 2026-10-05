@@ -313,16 +313,29 @@ async function api(req: Request, url: URL): Promise<Response> {
         if (!ev.start || ev.status === "cancelled") continue;
         const allDay = !!ev.start.date;
         const rawStart = ev.start.date ?? ev.start.dateTime ?? "";
-        const date = rawStart.slice(0, 10); // YYYY-MM-DD
+        const date = rawStart.slice(0, 10);
         if (!date) continue;
-        byDate[date] = byDate[date] ?? [];
-        byDate[date].push({
+        const entry = {
           id: ev.id ?? "",
           summary: ev.summary ?? "(No title)",
           start: ev.start.dateTime ? new Date(ev.start.dateTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
           end: ev.end?.dateTime ? new Date(ev.end.dateTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
           allDay,
-        });
+        };
+        if (allDay && ev.end?.date && ev.end.date > rawStart) {
+          // Expand multi-day all-day events (GCal end date is exclusive)
+          const cur = new Date(rawStart + "T12:00:00Z");
+          const endD = new Date(ev.end.date + "T12:00:00Z");
+          while (cur < endD) {
+            const d = cur.toISOString().slice(0, 10);
+            byDate[d] = byDate[d] ?? [];
+            byDate[d].push({ ...entry });
+            cur.setUTCDate(cur.getUTCDate() + 1);
+          }
+        } else {
+          byDate[date] = byDate[date] ?? [];
+          byDate[date].push(entry);
+        }
       }
       return json({ byDate });
     } catch (e) {
