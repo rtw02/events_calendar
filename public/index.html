@@ -89,6 +89,20 @@
   .dot { width: 3.5px; height: 3.5px; border-radius: 50%; flex-shrink: 0; }
   .dot.tentative-dot { border: 1px dashed rgba(255,255,255,0.4); background: transparent !important; }
   .gcal-badge { position: absolute; top: 2px; right: 3px; font-size: 7px; font-weight: 700; color: rgba(160,200,255,0.9); line-height: 1; }
+  .wx-badge { position: absolute; bottom: 3px; left: 0; right: 0; display: flex; align-items: center; justify-content: center; gap: 1px; pointer-events: none; }
+  .wx-emoji { font-size: 9px; line-height: 1; }
+  .wx-temp { font-size: 7.5px; font-weight: 600; color: var(--ink-3); line-height: 1; }
+  .tile.past .wx-temp { opacity: 0.5; }
+  .heatmap-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .hm-cell { aspect-ratio: 1; border-radius: 2px; cursor: default; transition: opacity 0.15s; }
+  .hm-cell:hover { opacity: 0.8; }
+  @media (max-width: 600px) {
+    .panel-wrap.open { width: 100%; position: fixed; inset: 0; z-index: 50; border-left: none; max-height: 100vh; }
+    .panel { max-height: 100vh; }
+    .tile { min-width: 0; }
+    header { padding: 10px 12px 0; }
+    .months-wrap { padding: 0 8px; }
+  }
 
   .panel-wrap { width: 0; flex-shrink: 0; overflow: hidden; border-left: 1px solid transparent; transition: width 0.32s cubic-bezier(0.4,0,0.2,1), border-color 0.2s ease, opacity 0.28s ease, transform 0.32s cubic-bezier(0.4,0,0.2,1); opacity: 0; transform: translateY(10px); }
   .panel-wrap.open { width: 260px; border-left-color: var(--border); opacity: 1; transform: translateY(0); }

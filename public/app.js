@@ -20,7 +20,9 @@ let allEvents = {}, goalsData = {}, friendsList = [];
 let selKey = null, selCat = 'other', selFriendId = null, isFriend = true, viewStart = 0;
 let activeTab = 'calendar', editingPlanIdx = null;
 let gcalConnected = false, gcalEmail = null, gcalByDate = {};
+let weatherByDate = {};
 let lastViewStart = -1;
+let calendarRenderedOnce = false;
 const suggCache = {};
 const now = new Date();
 const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -127,6 +129,10 @@ async function loadAll() {
   friendsList = frnds || [];
   goalsData = goals || {};
   renderAll();
+  // Weather (non-blocking)
+  fetch('/api/weather').then(r => r.json()).then(w => {
+    if (w.byDate) { weatherByDate = w.byDate; renderAll(); }
+  }).catch(() => {});
   // GCal status + live events (non-blocking)
   fetch('/api/gcal/status').then(r => r.json()).then(s => {
     gcalConnected = s.connected || false;
@@ -337,8 +343,9 @@ function renderCalendar() {
       const key = dayKey(Y, m, d), plans = allEvents[key] || [];
       const past = isPast(Y, m, d), today = isToday(Y, m, d);
       const hasFriend = plans.some(p => p.friend && isConfirmed(p));
-      const tile = document.createElement('div'); tile.className = 'tile stagger';
-      tile.style.animationDelay = `${row * 35}ms`;
+      const shouldAnimate = !calendarRenderedOnce || lastViewStart !== viewStart;
+      const tile = document.createElement('div'); tile.className = shouldAnimate ? 'tile stagger' : 'tile';
+      if (shouldAnimate) tile.style.animationDelay = `${row * 35}ms`;
       if (past) tile.classList.add('past');
       if (today) tile.classList.add('today');
       if (plans.length > 0) tile.classList.add('success');
@@ -365,6 +372,14 @@ function renderCalendar() {
         });
         tile.appendChild(dots);
       }
+      // Weather badge (upcoming days only)
+      const wx = weatherByDate[key];
+      if (wx && !past) {
+        const wb = document.createElement('div'); wb.className = 'wx-badge';
+        const we = document.createElement('span'); we.className = 'wx-emoji'; we.textContent = wx.emoji;
+        const wt = document.createElement('span'); wt.className = 'wx-temp'; wt.textContent = `${wx.hi}°`;
+        wb.appendChild(we); wb.appendChild(wt); tile.appendChild(wb);
+      }
       if (!past) tile.addEventListener('click', (e) => {
         addRipple(tile, e);
         if (selKey === key) { selKey = null; closePanel(); renderCalendar(); }
@@ -378,6 +393,7 @@ function renderCalendar() {
   document.getElementById('nav-prev').disabled = viewStart === 0;
   document.getElementById('nav-next').disabled = viewStart === 1;
   document.getElementById('nav-range').textContent = MONTHS.slice(viewStart, viewStart + 2).map(x => x.label).join(' – ');
+  calendarRenderedOnce = true;
 }
 
 function renderAll() {
@@ -411,9 +427,12 @@ function renderPanel(key) {
   const dayName = DAYS[new Date(Y, m, d).getDay()];
   const hasFriend = plans.some(p => p.friend && isConfirmed(p));
 
+  const wx = weatherByDate[key];
+  const wxStr = wx ? `${wx.emoji} ${wx.hi}°/${wx.lo}° · ${wx.desc}${wx.precip > 30 ? ` · ${wx.precip}% rain` : ''}` : '';
   let html = `<div class="panel-head">
     <div class="panel-date">${mo ? mo.name : ''} ${d}, ${Y}</div>
     <div class="panel-dow">${dayName}${past ? ' · Past' : ''}${hasFriend ? ' · <span style="color:var(--accent)">★ Success</span>' : ''}</div>
+    ${wxStr ? `<div style="font-size:10px;color:var(--ink-3);margin-top:4px;display:flex;align-items:center;gap:4px">${wxStr}</div>` : ''}
   </div>
   <div class="plans-section"><div class="section-label">Plans</div>`;
 
@@ -1124,14 +1143,40 @@ function renderInsights() {
   });
   html += `</div></div>`;
 
+  // Activity heatmap
+  html += `<div>
+    <div class="section-label" style="margin-bottom:7px">Activity heatmap · Sep–Nov</div>
+    <div style="display:flex;gap:3px;margin-bottom:4px">
+      ${['S','M','T','W','T','F','S'].map(l=>`<div style="flex:1;text-align:center;font-size:7px;color:var(--ink-3)">${l}</div>`).join('')}
+    </div>
+    <div class="heatmap-grid" id="heatmap-grid">`;
+  const hmStart = new Date(Y, 8, 1); // Sep 1
+  const hmStartDow = hmStart.getDay();
+  for (let i = 0; i < hmStartDow; i++) html += `<div class="hm-cell" style="background:transparent"></div>`;
+  for (let mo = 8; mo <= 10; mo++) {
+    const days = new Date(Y, mo + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const k = dayKey(Y, mo, d);
+      const n = (allEvents[k] || []).length;
+      const alpha = n === 0 ? 0.06 : n === 1 ? 0.25 : n === 2 ? 0.5 : 0.85;
+      const title = `${MONTHS.find(x=>x.m===mo)?.label} ${d}: ${n} plan${n!==1?'s':''}`;
+      html += `<div class="hm-cell" title="${title}" style="background:rgba(94,191,138,${alpha})"></div>`;
+    }
+  }
+  html += `</div></div>`;
+
   // Smart recs
   html += `<div>
-    <div class="section-label" style="margin-bottom:7px">Smart recs for fall</div>
-    <div style="display:flex;flex-direction:column;gap:5px">`;
-  INSIGHTS_RECS.forEach(rec => {
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
+      <div class="section-label" style="margin-bottom:0">Smart recs for fall</div>
+      <button id="refresh-recs-btn" style="font-size:9px;font-weight:700;padding:2px 8px;border-radius:20px;border:1px solid rgba(94,191,138,0.35);background:rgba(94,191,138,0.08);color:var(--accent);cursor:pointer">✦ Refresh</button>
+    </div>
+    <div id="recs-list" style="display:flex;flex-direction:column;gap:5px">`;
+
+  function recHtml(rec) {
     const cat = CATS.find(c => c.id === rec.cat) || CATS[4];
     const done = rec.suggestDate && (allEvents[rec.suggestDate] || []).some(p => p.name === rec.planName);
-    html += `<div style="border:1px solid ${done?'rgba(94,191,138,0.3)':'var(--border)'};border-radius:9px;padding:9px 11px;background:${done?'rgba(94,191,138,0.04)':'rgba(255,255,255,0.025)'}">
+    return `<div style="border:1px solid ${done?'rgba(94,191,138,0.3)':'var(--border)'};border-radius:9px;padding:9px 11px;background:${done?'rgba(94,191,138,0.04)':'rgba(255,255,255,0.025)'}">
       <div style="display:flex;gap:9px;align-items:flex-start">
         <span style="font-size:17px;flex-shrink:0;line-height:1.15">${rec.icon}</span>
         <div style="flex:1;min-width:0">
@@ -1146,7 +1191,9 @@ function renderInsights() {
         </div>
       </div>
     </div>`;
-  });
+  }
+
+  INSIGHTS_RECS.forEach(rec => { html += recHtml(rec); });
   html += `</div></div>`;
 
   html += `</div>`;
@@ -1166,6 +1213,34 @@ function renderInsights() {
       btn.disabled = true;
     });
   });
+
+  // AI-powered recs refresh
+  const refreshBtn = panel.querySelector('#refresh-recs-btn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.textContent = '⟳ Thinking…'; refreshBtn.disabled = true;
+      const recsList = panel.querySelector('#recs-list');
+      try {
+        const planSummary = Object.entries(allEvents).map(([k,ps]) => `${k}: ${ps.map(p=>p.name).join(', ')}`).join('; ');
+        const topCats = Object.entries(catBreakdown()).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k}(${v})`).join(', ');
+        const friends = friendsList.map(f=>f.name).join(', ');
+        const data = await api('/api/ai/insights', 'POST', { plans: planSummary, friends, topCats });
+        if (data.recs?.length) {
+          recsList.innerHTML = data.recs.map(recHtml).join('');
+          recsList.querySelectorAll('.insight-plan-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const { date, name, cat } = btn.dataset;
+              const arr = [...(allEvents[date] || [])];
+              arr.push({ name, cat, friend: true, confirmed: false });
+              await persistDay(date, arr);
+              btn.textContent = '✓ Added'; btn.disabled = true;
+            });
+          });
+        }
+      } catch {}
+      refreshBtn.textContent = '✦ Refresh'; refreshBtn.disabled = false;
+    });
+  }
 }
 
 // ── Nav ───────────────────────────────────────────────────────

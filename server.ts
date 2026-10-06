@@ -96,6 +96,32 @@ async function readBody(req: Request) {
   try { return await req.json(); } catch { return {}; }
 }
 
+// ── Weather Helpers ───────────────────────────────────────────
+function weatherEmoji(code: number): string {
+  if (code === 0) return '☀️';
+  if (code <= 2) return '🌤️';
+  if (code === 3) return '☁️';
+  if (code <= 48) return '🌫️';
+  if (code <= 55) return '🌦️';
+  if (code <= 67) return '🌧️';
+  if (code <= 77) return '🌨️';
+  if (code <= 82) return '🌦️';
+  if (code <= 86) return '❄️';
+  return '⛈️';
+}
+function weatherDesc(code: number): string {
+  if (code === 0) return 'Clear';
+  if (code <= 2) return 'Partly cloudy';
+  if (code === 3) return 'Overcast';
+  if (code <= 48) return 'Foggy';
+  if (code <= 55) return 'Drizzle';
+  if (code <= 67) return 'Rain';
+  if (code <= 77) return 'Snow';
+  if (code <= 82) return 'Showers';
+  if (code <= 86) return 'Snow showers';
+  return 'Thunderstorm';
+}
+
 // ── GCal Time Parser ─────────────────────────────────────────
 function parseEventTime(date: string, timeStr?: string) {
   if (!timeStr || !timeStr.trim()) return { start: { date }, end: { date } };
@@ -341,6 +367,49 @@ async function api(req: Request, url: URL): Promise<Response> {
     } catch (e) {
       return json({ error: String(e) }, 500);
     }
+  }
+
+  // ── Weather ─────────────────────────────────────────────────
+  if (p === "/api/weather" && m === "GET") {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const end = new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10);
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.0060&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max&timezone=America%2FNew_York&temperature_unit=fahrenheit&start_date=${today}&end_date=${end}`;
+      const res = await fetch(url);
+      if (!res.ok) return json({ byDate: {} });
+      const data = await res.json() as { daily: { time: string[]; temperature_2m_max: number[]; temperature_2m_min: number[]; weathercode: number[]; precipitation_probability_max: number[] } };
+      const byDate: Record<string, { hi: number; lo: number; code: number; emoji: string; desc: string; precip: number }> = {};
+      data.daily.time?.forEach((date, i) => {
+        byDate[date] = {
+          hi: Math.round(data.daily.temperature_2m_max[i]),
+          lo: Math.round(data.daily.temperature_2m_min[i]),
+          code: data.daily.weathercode[i],
+          emoji: weatherEmoji(data.daily.weathercode[i]),
+          desc: weatherDesc(data.daily.weathercode[i]),
+          precip: data.daily.precipitation_probability_max[i] ?? 0,
+        };
+      });
+      return json({ byDate });
+    } catch (e) { return json({ byDate: {} }); }
+  }
+
+  // ── AI Insights ──────────────────────────────────────────────
+  if (p === "/api/ai/insights" && m === "POST") {
+    if (!ai) return json({ error: "Set ANTHROPIC_API_KEY in .env" }, 503);
+    const { plans, friends, topCats } = await readBody(req);
+    try {
+      const msg = await ai.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 800,
+        messages: [{
+          role: "user",
+          content: `You are analyzing a New Yorker's fall 2026 social calendar (Sep–Nov). Their data: ${plans}. Top activity categories: ${topCats}. Friends they hang out with: ${friends}. Generate 5 smart, specific fall recommendations for NYC. Make them personal based on their actual patterns. Format as JSON only: {"recs":[{"icon":"emoji","title":"short title","why":"1-2 sentences","cat":"upstate|fair|halloween|friendsgiving|other","suggestDate":"YYYY-MM-DD or null","planName":"short plan name"}]}`,
+        }],
+      });
+      const raw = msg.content[0].type === "text" ? msg.content[0].text : "{}";
+      const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      return json(parsed);
+    } catch (e) { return json({ error: String(e) }, 500); }
   }
 
   return json({ error: "Not found" }, 404);
