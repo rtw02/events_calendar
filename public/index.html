@@ -49,13 +49,13 @@
   .tab-btn:hover:not(.active) { background: rgba(255,255,255,0.08); }
 
   .main { display: flex; flex: 1; min-height: 520px; overflow: hidden; }
-  .months-wrap { flex: 1; display: flex; flex-direction: column; padding: 14px 12px; gap: 8px; overflow-y: auto; background: rgba(4,8,20,0.45); }
+  .months-wrap { flex: 1; display: flex; flex-direction: column; padding: 16px 16px; gap: 10px; overflow-y: auto; background: rgba(4,8,20,0.45); }
   .months-nav { display: flex; align-items: center; justify-content: center; gap: 12px; }
   .nav-btn { background: var(--glass2); border: 1px solid var(--border); color: var(--ink-2); width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; }
   .nav-btn:disabled { opacity: 0.25; cursor: default; }
   #nav-range { font-size: 11px; font-weight: 600; color: var(--ink-2); letter-spacing: 0.04em; }
-  .months { display: flex; gap: 12px; }
-  .month-block { flex: 1; }
+  .months { display: flex; gap: 14px; }
+  .month-block { flex: 1; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
   .month-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
   .month-name { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
   .goal-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
@@ -77,6 +77,8 @@
   .tile.success.pulse-in { animation: successPulse 0.5s ease-out; }
   @keyframes successPulse { 0%,100% { box-shadow: none; } 40% { box-shadow: 0 0 0 4px rgba(94,191,138,0.35); } }
   .tile.gcal-only { background: rgba(160,200,255,0.07); border-color: rgba(160,200,255,0.22); }
+  .tile.gcal-multiday { background: rgba(220,185,50,0.2) !important; border-color: rgba(220,185,50,0.5) !important; }
+  .tile.past.gcal-multiday { background: rgba(220,185,50,0.1) !important; border-color: rgba(220,185,50,0.25) !important; }
   .tile.selected { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.3); }
   .tile:not(.past):not(.empty):hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.18); transform: scale(1.06) translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.35); }
   .tile.stagger { animation: tileIn 0.3s cubic-bezier(0.34,1.56,0.64,1) both; }
@@ -89,10 +91,10 @@
   .dot { width: 3.5px; height: 3.5px; border-radius: 50%; flex-shrink: 0; }
   .dot.tentative-dot { border: 1px dashed rgba(255,255,255,0.4); background: transparent !important; }
   .gcal-badge { position: absolute; top: 2px; right: 3px; font-size: 7px; font-weight: 700; color: rgba(160,200,255,0.9); line-height: 1; }
-  .wx-badge { position: absolute; bottom: 3px; left: 0; right: 0; display: flex; align-items: center; justify-content: center; gap: 1px; pointer-events: none; }
-  .wx-emoji { font-size: 9px; line-height: 1; }
-  .wx-temp { font-size: 7.5px; font-weight: 600; color: var(--ink-3); line-height: 1; }
-  .tile.past .wx-temp { opacity: 0.5; }
+  .wx-badge { position: absolute; bottom: 3px; left: 0; right: 0; display: flex; align-items: center; justify-content: center; gap: 2px; pointer-events: none; }
+  .wx-emoji { font-size: 13px; line-height: 1; }
+  .wx-temp { font-size: 9px; font-weight: 700; color: var(--ink-2); line-height: 1; }
+  .tile.past .wx-temp { opacity: 0.45; }
   .heatmap-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
   .hm-cell { aspect-ratio: 1; border-radius: 2px; cursor: default; transition: opacity 0.15s; }
   .hm-cell:hover { opacity: 0.8; }

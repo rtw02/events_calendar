@@ -26,6 +26,8 @@ let calendarRenderedOnce = false;
 const suggCache = {};
 const now = new Date();
 const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+// Default view: current month (clamped so 2 months always fit)
+viewStart = Math.min(Math.max(MONTHS.findIndex(x => x.m === now.getMonth()), 0), MONTHS.length - 2);
 
 // ── Animations ────────────────────────────────────────────────
 function countUp(el, target, dur = 700) {
@@ -348,14 +350,14 @@ function renderCalendar() {
       if (shouldAnimate) tile.style.animationDelay = `${row * 35}ms`;
       if (past) tile.classList.add('past');
       if (today) tile.classList.add('today');
-      if (plans.length > 0) tile.classList.add('success');
+      const gcalEvts = gcalByDate[key] || [];
+      if (plans.length > 0 || gcalEvts.length > 0) tile.classList.add('success');
+      if (plans.length === 0 && gcalEvts.some(e => e.multiDay)) tile.classList.add('gcal-multiday');
       if (selKey === key) tile.classList.add('selected');
       const dn = document.createElement('div'); dn.className = 'dn'; dn.textContent = d; tile.appendChild(dn);
-      const gcalEvts = gcalByDate[key] || [];
       const importedIds = new Set((allEvents[key] || []).map(p => p.gcalId).filter(Boolean));
       const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
-      if (unimported.length > 0 && plans.length === 0) tile.classList.add('gcal-only');
-      if (plans.length > 0 || unimported.length > 0) {
+      if (plans.length > 0 || gcalEvts.length > 0) {
         const dots = document.createElement('div'); dots.className = 'dots';
         plans.slice(0, 4).forEach(p => {
           const cat = CATS.find(c => c.id === p.cat) || CATS[4];
@@ -364,7 +366,7 @@ function renderCalendar() {
           dot.style.background = past ? 'rgba(255,255,255,0.18)' : cat.hex;
           dots.appendChild(dot);
         });
-        unimported.slice(0, 3).forEach(() => {
+        unimported.slice(0, 3 - Math.min(plans.length, 4)).forEach(() => {
           const dot = document.createElement('div'); dot.className = 'dot';
           dot.style.background = past ? 'rgba(255,255,255,0.12)' : 'rgba(160,200,255,0.7)';
           dot.style.border = past ? 'none' : '1px solid rgba(160,200,255,0.9)';
@@ -374,7 +376,7 @@ function renderCalendar() {
       }
       // Weather badge (upcoming days only)
       const wx = weatherByDate[key];
-      if (wx && !past) {
+      if (wx) {
         const wb = document.createElement('div'); wb.className = 'wx-badge';
         const we = document.createElement('span'); we.className = 'wx-emoji'; we.textContent = wx.emoji;
         const wt = document.createElement('span'); wt.className = 'wx-temp'; wt.textContent = `${wx.hi}°`;
@@ -390,7 +392,12 @@ function renderCalendar() {
     block.appendChild(grid); container.appendChild(block);
   });
   if (slideDir) { container.classList.remove('months-slide','months-slide-left'); void container.offsetWidth; container.classList.add(slideDir); }
-  document.getElementById('nav-prev').disabled = viewStart === 0;
+  // Disable back if the month we'd reveal is fully past
+  const prevAllPast = viewStart === 0 || (() => {
+    const { m } = MONTHS[viewStart - 1];
+    return isPast(Y, m, new Date(Y, m + 1, 0).getDate());
+  })();
+  document.getElementById('nav-prev').disabled = prevAllPast;
   document.getElementById('nav-next').disabled = viewStart === 1;
   document.getElementById('nav-range').textContent = MONTHS.slice(viewStart, viewStart + 2).map(x => x.label).join(' – ');
   calendarRenderedOnce = true;
