@@ -34,9 +34,6 @@ const delGoal    = db.query("DELETE FROM goals WHERE month_key = $key");
 // ── Google Calendar ───────────────────────────────────────────
 const TOKENS_FILE = "./gcal-tokens.json";
 const GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar.events"];
-let gcalCache: { data: unknown; ts: number } | null = null;
-const GCAL_CACHE_TTL = 5 * 60 * 1000;
-function invalidateGCalCache() { gcalCache = null; }
 
 function makeOAuth2() {
   const port = process.env.PORT ?? "3003";
@@ -276,7 +273,6 @@ async function api(req: Request, url: URL): Promise<Response> {
         calendarId: "primary",
         requestBody: { summary: title, ...timing },
       });
-      invalidateGCalCache();
       return json({ gcalId: event.data.id });
     } catch (e) { return json({ error: String(e) }, 500); }
   }
@@ -292,7 +288,6 @@ async function api(req: Request, url: URL): Promise<Response> {
       oauth2.on("tokens", (t) => saveTokens({ ...loadTokens(), ...t } as Record<string, unknown>));
       const calendar = google.calendar({ version: "v3", auth: oauth2 });
       await calendar.events.delete({ calendarId: "primary", eventId: gcalId });
-      invalidateGCalCache();
       return json({ ok: true });
     } catch (e) { return json({ error: String(e) }, 500); }
   }
@@ -314,7 +309,6 @@ async function api(req: Request, url: URL): Promise<Response> {
         eventId: gcalId,
         requestBody: { summary: title, ...timing },
       });
-      invalidateGCalCache();
       return json({ ok: true });
     } catch (e) { return json({ error: String(e) }, 500); }
   }
@@ -323,7 +317,6 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (p === "/api/gcal/events" && m === "GET") {
     const tokens = loadTokens();
     if (!tokens) return json({ error: "Not connected" }, 401);
-    if (gcalCache && Date.now() - gcalCache.ts < GCAL_CACHE_TTL) return json(gcalCache.data);
     try {
       const oauth2 = makeOAuth2();
       oauth2.setCredentials(tokens);
@@ -370,7 +363,6 @@ async function api(req: Request, url: URL): Promise<Response> {
           byDate[date].push(entry);
         }
       }
-      gcalCache = { data: { byDate }, ts: Date.now() };
       return json({ byDate });
     } catch (e) {
       return json({ error: String(e) }, 500);

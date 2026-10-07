@@ -351,13 +351,15 @@ function renderCalendar() {
       if (past) tile.classList.add('past');
       if (today) tile.classList.add('today');
       const gcalEvts = gcalByDate[key] || [];
-      if (plans.length > 0 || gcalEvts.length > 0) tile.classList.add('success');
-      if (plans.length === 0 && gcalEvts.some(e => e.multiDay)) tile.classList.add('gcal-multiday');
+      const gcalTimed = gcalEvts.filter(e => !e.allDay);
+      const gcalAllDay = gcalEvts.filter(e => e.allDay);
+      if (plans.length > 0 || gcalTimed.length > 0) tile.classList.add('success');
+      if (plans.length === 0 && gcalTimed.length === 0 && gcalAllDay.length > 0) tile.classList.add('gcal-multiday');
       if (selKey === key) tile.classList.add('selected');
       const dn = document.createElement('div'); dn.className = 'dn'; dn.textContent = d; tile.appendChild(dn);
       const importedIds = new Set((allEvents[key] || []).map(p => p.gcalId).filter(Boolean));
       const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
-      if (plans.length > 0 || gcalEvts.length > 0) {
+      if (plans.length > 0 || gcalTimed.length > 0) {
         const dots = document.createElement('div'); dots.className = 'dots';
         plans.slice(0, 4).forEach(p => {
           const cat = CATS.find(c => c.id === p.cat) || CATS[4];
@@ -366,7 +368,8 @@ function renderCalendar() {
           dot.style.background = past ? 'rgba(255,255,255,0.18)' : cat.hex;
           dots.appendChild(dot);
         });
-        unimported.slice(0, 3 - Math.min(plans.length, 4)).forEach(() => {
+        const unimportedTimed = unimported.filter(e => !e.allDay);
+        unimportedTimed.slice(0, 3 - Math.min(plans.length, 4)).forEach(() => {
           const dot = document.createElement('div'); dot.className = 'dot';
           dot.style.background = past ? 'rgba(255,255,255,0.12)' : 'rgba(160,200,255,0.7)';
           dot.style.border = past ? 'none' : '1px solid rgba(160,200,255,0.9)';
@@ -730,7 +733,7 @@ async function refreshGCalEvents(silent = true) {
   const btn = document.getElementById('gcal-btn');
   if (!silent && btn) { btn.textContent = '⟳ Syncing…'; btn.disabled = true; }
   try {
-    const res = await fetch('/api/gcal/events');
+    const res = await fetch(silent ? '/api/gcal/events' : '/api/gcal/events?refresh=true');
     const data = await res.json();
     if (data.byDate) {
       gcalByDate = data.byDate;
