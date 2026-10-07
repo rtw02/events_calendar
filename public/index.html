@@ -96,12 +96,47 @@
   .heatmap-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
   .hm-cell { aspect-ratio: 1; border-radius: 2px; cursor: default; transition: opacity 0.15s; }
   .hm-cell:hover { opacity: 0.8; }
-  @media (max-width: 600px) {
-    .panel-wrap.open { width: 100%; position: fixed; inset: 0; z-index: 50; border-left: none; max-height: 100vh; }
-    .panel { max-height: 100vh; }
+  /* ── Responsive ──────────────────────────────────────── */
+
+  /* Portrait orientation: vertical monitors, tablets in portrait */
+  @media (orientation: portrait) {
+    .months { flex-direction: column; }
+    .month-block { flex: none; }
+    .main { flex-direction: column; overflow-y: auto; min-height: 0; }
+    .months-wrap { overflow-y: visible; }
+    /* panel slides up from bottom as a sheet */
+    .panel-wrap { width: 100% !important; border-left: none !important; border-top: 1px solid transparent;
+      transition: max-height 0.32s cubic-bezier(0.4,0,0.2,1), border-color 0.2s, opacity 0.28s, transform 0.32s cubic-bezier(0.4,0,0.2,1) !important;
+      max-height: 0; overflow: hidden; opacity: 0; transform: translateY(12px); flex-shrink: 0; }
+    .panel-wrap.open { width: 100% !important; max-height: 55vh; border-top-color: var(--border); opacity: 1; transform: translateY(0); }
+    .panel { width: 100% !important; max-height: 55vh; box-sizing: border-box; }
+  }
+
+  /* Narrow landscape (600–900px wide, landscape) */
+  @media (orientation: landscape) and (max-width: 900px) {
+    .months { flex-direction: column; }
+    .month-block { flex: none; }
+    .panel-wrap.open { width: 200px; }
+    .panel { width: 200px; }
+  }
+
+  /* Medium landscape (900–1100px): slightly narrower panel */
+  @media (orientation: landscape) and (min-width: 901px) and (max-width: 1100px) {
+    .panel-wrap.open { width: 230px; }
+    .panel { width: 230px; }
+  }
+
+  /* Mobile (< 540px): compact header, bottom sheet panel */
+  @media (max-width: 540px) {
+    .hdr { padding: 10px 12px 8px; }
+    .months-wrap { padding: 6px 8px; }
     .tile { min-width: 0; }
-    header { padding: 10px 12px 0; }
-    .months-wrap { padding: 0 8px; }
+    .stats { gap: 10px; }
+    .stat-n { font-size: 16px; }
+    .hdr-title { font-size: 18px; }
+    /* Override portrait sheet to be taller on small screens */
+    .panel-wrap.open { max-height: 65vh !important; }
+    .panel { max-height: 65vh !important; }
   }
 
   .panel-wrap { width: 0; flex-shrink: 0; overflow: hidden; border-left: 1px solid transparent; transition: width 0.32s cubic-bezier(0.4,0,0.2,1), border-color 0.2s ease, opacity 0.28s ease, transform 0.32s cubic-bezier(0.4,0,0.2,1); opacity: 0; transform: translateY(10px); }
