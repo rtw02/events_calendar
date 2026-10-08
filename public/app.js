@@ -16,11 +16,12 @@ const Y = 2026;
 const FRIEND_COLORS = ['#5EBF8A','#E8884A','#B07FD8','#78AADC','#E87878','#c8a84b','#78DCB0','#DC7878'];
 
 // ── State ─────────────────────────────────────────────────────
-let allEvents = {}, goalsData = {}, friendsList = [];
+let allEvents = {}, goalsData = {}, friendsList = [], tagsData = {};
 let selKey = null, selCat = 'other', selFriendId = null, isFriend = true, viewStart = 0;
 let activeTab = 'calendar', editingPlanIdx = null;
 let gcalConnected = false, gcalEmail = null, gcalByDate = {};
 let weatherByDate = {};
+let gcalRefreshInterval = null;
 let lastViewStart = -1;
 let calendarRenderedOnce = false;
 const suggCache = {};
@@ -121,15 +122,17 @@ async function api(path, method = 'GET', body) {
 }
 
 async function loadAll() {
-  const [evts, frnds, goals] = await Promise.all([
+  const [evts, frnds, goals, tags] = await Promise.all([
     api('/api/events'),
     api('/api/friends'),
     api('/api/goals'),
+    fetch('/api/tags').then(r => r.json()).catch(() => ({})),
   ]);
   allEvents = evts || {};
   Object.keys(allEvents).forEach(k => { allEvents[k] = sortPlans(allEvents[k]); });
   friendsList = frnds || [];
   goalsData = goals || {};
+  tagsData = tags || {};
   renderAll();
   // Weather (non-blocking)
   fetch('/api/weather').then(r => r.json()).then(w => {
@@ -144,7 +147,12 @@ async function loadAll() {
       history.replaceState(null, '', '/');
       showGCalSync();
     }
-    if (gcalConnected) refreshGCalEvents();
+    if (gcalConnected) {
+      refreshGCalEvents();
+      if (!gcalRefreshInterval) {
+        gcalRefreshInterval = setInterval(() => refreshGCalEvents(true), 5 * 60 * 1000);
+      }
+    }
   }).catch(() => {});
 }
 
@@ -157,11 +165,45 @@ function goalKey(m) { return `${Y}-${String(m+1).padStart(2,'0')}`; }
 function monthGoal(m) { return goalsData[goalKey(m)] || 0; }
 function friendName(id) { return (friendsList.find(x => x.id === id) || {}).name || ''; }
 
+function isCoveredDay(key, gcalEvts) {
+  const timedEvts = (gcalEvts || []).filter(e => !e.allDay && e.startMin != null && e.endMin != null);
+  if (!timedEvts.length) return false;
+  const [, mStr, dStr] = key.split('-');
+  const m = parseInt(mStr) - 1, d = parseInt(dStr);
+  const dow = new Date(Y, m, d).getDay();
+  const isWeekend = dow === 0 || dow === 6;
+  const windowStart = isWeekend ? 780 : 960;   // 1pm : 4pm
+  const windowEnd   = isWeekend ? 1380 : 1260; // 11pm : 9pm
+  const threshold   = isWeekend ? 360 : 180;   // 60% of 600 : 60% of 300
+  const intervals = [];
+  for (const ev of timedEvts) {
+    const s = Math.max(ev.startMin, windowStart);
+    const e = Math.min(ev.endMin, windowEnd);
+    if (s < e) intervals.push([s, e]);
+  }
+  if (!intervals.length) return false;
+  intervals.sort((a, b) => a[0] - b[0]);
+  let coverage = 0, cs = intervals[0][0], ce = intervals[0][1];
+  for (let i = 1; i < intervals.length; i++) {
+    const [s, e] = intervals[i];
+    if (s <= ce) ce = Math.max(ce, e);
+    else { coverage += ce - cs; cs = s; ce = e; }
+  }
+  coverage += ce - cs;
+  return coverage >= threshold;
+}
+
+function isSuccessDay(key) {
+  const gcalEvts = gcalByDate[key] || [];
+  const dbPlans = allEvents[key] || [];
+  return isCoveredDay(key, gcalEvts) || dbPlans.some(p => p.friend && isConfirmed(p));
+}
+
 function monthSuccessCount(m) {
   const days = new Date(Y, m + 1, 0).getDate();
   let n = 0;
   for (let d = 1; d <= days; d++) {
-    if ((allEvents[dayKey(Y,m,d)] || []).some(p => p.friend && isConfirmed(p))) n++;
+    if (isSuccessDay(dayKey(Y, m, d))) n++;
   }
   return n;
 }
@@ -172,7 +214,7 @@ function calcStreak() {
   d.setDate(d.getDate() - 1);
   for (let i = 0; i < 92; i++) {
     const k = dayKey(d.getFullYear(), d.getMonth(), d.getDate());
-    if ((allEvents[k] || []).some(p => p.friend && isConfirmed(p))) { streak++; d.setDate(d.getDate() - 1); }
+    if (isSuccessDay(k)) { streak++; d.setDate(d.getDate() - 1); }
     else break;
   }
   return streak;
@@ -196,13 +238,21 @@ function calcGaps() {
 function friendFrequency() {
   const counts = {};
   Object.values(allEvents).flat().forEach(p => { if (p.friendName) counts[p.friendName] = (counts[p.friendName] || 0) + 1; });
+  Object.values(tagsData).forEach(tag => { (tag.friends || []).forEach(f => { counts[f] = (counts[f] || 0) + 1; }); });
   return Object.entries(counts).sort((a, b) => b[1] - a[1]);
 }
 
 function catBreakdown() {
   const counts = {}; CATS.forEach(c => { counts[c.id] = 0; });
   Object.values(allEvents).flat().forEach(p => { if (p.cat) counts[p.cat] = (counts[p.cat] || 0) + 1; });
+  Object.values(tagsData).forEach(tag => { if (tag.cat && counts[tag.cat] !== undefined) counts[tag.cat]++; });
   return counts;
+}
+
+async function saveTag(gcalId, dateKey, friends, cat) {
+  const tagKey = `${gcalId}::${dateKey}`;
+  tagsData[tagKey] = { friends, cat };
+  try { await api(`/api/tags/${encodeURIComponent(gcalId)}/${dateKey}`, 'PUT', { friends, cat }); } catch {}
 }
 
 // ── Persist ───────────────────────────────────────────────────
@@ -285,9 +335,10 @@ function updateStats() {
   for (let mo = 8; mo <= 10; mo++) {
     const days = new Date(Y, mo + 1, 0).getDate();
     for (let d = 1; d <= days; d++) {
-      const plans = allEvents[dayKey(Y, mo, d)] || [];
+      const key = dayKey(Y, mo, d);
+      const plans = allEvents[key] || [];
       total += plans.length;
-      if (plans.some(p => p.friend && isConfirmed(p))) success++;
+      if (isSuccessDay(key)) success++;
       if (!isPast(Y, mo, d)) remain++;
     }
   }
@@ -351,14 +402,16 @@ function renderCalendar() {
       if (past) tile.classList.add('past');
       if (today) tile.classList.add('today');
       const gcalEvts = gcalByDate[key] || [];
-      const gcalTimed = gcalEvts.filter(e => !e.allDay);
       const gcalAllDay = gcalEvts.filter(e => e.allDay);
-      if (plans.length > 0 || gcalTimed.length > 0) tile.classList.add('success');
-      if (plans.length === 0 && gcalTimed.length === 0 && gcalAllDay.length > 0) tile.classList.add('gcal-multiday');
+      const covered = isCoveredDay(key, gcalEvts);
+      const dbFriend = plans.some(p => p.friend && isConfirmed(p));
+      if (covered || dbFriend || plans.length > 0) tile.classList.add('success');
+      else if (gcalEvts.length > 0 || gcalAllDay.length > 0) tile.classList.add('gcal-multiday');
       if (selKey === key) tile.classList.add('selected');
       const dn = document.createElement('div'); dn.className = 'dn'; dn.textContent = d; tile.appendChild(dn);
       const importedIds = new Set((allEvents[key] || []).map(p => p.gcalId).filter(Boolean));
       const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
+      const gcalTimed = gcalEvts.filter(e => !e.allDay);
       if (plans.length > 0 || gcalTimed.length > 0) {
         const dots = document.createElement('div'); dots.className = 'dots';
         plans.slice(0, 4).forEach(p => {
@@ -435,13 +488,14 @@ function renderPanel(key) {
   const mo = MONTHS.find(x => x.m === m);
   const past = isPast(Y, m, d);
   const dayName = DAYS[new Date(Y, m, d).getDay()];
-  const hasFriend = plans.some(p => p.friend && isConfirmed(p));
+  const gcalEvtsPanel = gcalByDate[key] || [];
+  const success = isSuccessDay(key);
 
   const wx = weatherByDate[key];
   const wxStr = wx ? `${wx.emoji} ${wx.hi}°/${wx.lo}° · ${wx.desc}${wx.precip > 30 ? ` · ${wx.precip}% rain` : ''}` : '';
   let html = `<div class="panel-head">
     <div class="panel-date">${mo ? mo.name : ''} ${d}, ${Y}</div>
-    <div class="panel-dow">${dayName}${past ? ' · Past' : ''}${hasFriend ? ' · <span style="color:var(--accent)">★ Success</span>' : ''}</div>
+    <div class="panel-dow">${dayName}${past ? ' · Past' : ''}${success ? ' · <span style="color:var(--accent)">★ Success</span>' : ''}</div>
     ${wxStr ? `<div style="font-size:10px;color:var(--ink-3);margin-top:4px;display:flex;align-items:center;gap:4px">${wxStr}</div>` : ''}
   </div>
   <div class="plans-section"><div class="section-label">Plans</div>`;
@@ -477,24 +531,52 @@ function renderPanel(key) {
   // GCal live events for this day
   const gcalEvts = gcalByDate[key] || [];
   const importedIds = new Set(plans.map(p => p.gcalId).filter(Boolean));
-  const unimported = gcalEvts.filter(e => !importedIds.has(e.id));
-  const imported = gcalEvts.filter(e => importedIds.has(e.id));
   if (gcalEvts.length > 0) {
     html += `<div class="plans-section"><div class="section-label" style="color:rgba(160,200,255,0.6)">From Google Calendar</div>`;
     gcalEvts.forEach(ev => {
       const isImported = importedIds.has(ev.id);
       const timeStr = ev.allDay ? 'all day' : (ev.start ? `${ev.start}${ev.end ? '–'+ev.end : ''}` : '');
-      html += `<div class="plan-item" style="opacity:${isImported?'0.45':'1'}">
-        <div class="plan-dot" style="background:rgba(160,200,255,${isImported?'0.3':'0.8'});flex-shrink:0"></div>
-        <div class="plan-info">
-          <div class="plan-name" style="color:${isImported?'var(--ink-3)':'var(--ink)'}">${ev.summary}</div>
-          ${timeStr ? `<div class="plan-meta">${timeStr}</div>` : ''}
-          ${isImported ? `<div class="plan-meta" style="color:rgba(94,191,138,0.5)">✓ added to plans</div>` : ''}
+      const tagKey = `${ev.id}::${key}`;
+      const tag = tagsData[tagKey] || { friends: [], cat: 'other' };
+      html += `<div class="plan-item gcal-evt-item" data-gcal-id="${ev.id}" data-key="${key}" style="flex-direction:column;align-items:stretch;gap:0">
+        <div style="display:flex;align-items:flex-start;gap:8px">
+          <div class="plan-dot" style="background:rgba(160,200,255,${isImported?'0.3':'0.8'});flex-shrink:0;margin-top:3px"></div>
+          <div class="plan-info" style="flex:1;min-width:0">
+            <div class="plan-name" style="color:${isImported?'var(--ink-3)':'var(--ink)'}">${ev.summary}</div>
+            ${timeStr ? `<div class="plan-meta">${timeStr}</div>` : ''}
+            ${ev.location ? `<div class="plan-meta" style="color:rgba(232,234,240,0.45)">📍 ${ev.location}</div>` : ''}
+            ${ev.description ? `<div class="plan-meta" style="color:rgba(232,234,240,0.35);font-style:italic;white-space:pre-wrap;max-height:40px;overflow:hidden">${ev.description.slice(0,120)}${ev.description.length>120?'…':''}</div>` : ''}
+            ${ev.attendees && ev.attendees.length ? `<div class="plan-meta" style="color:rgba(160,200,255,0.5)">👥 ${ev.attendees.slice(0,4).join(', ')}${ev.attendees.length>4?' +more':''}</div>` : ''}
+            ${isImported ? `<div class="plan-meta" style="color:rgba(94,191,138,0.5)">✓ added to plans</div>` : ''}
+          </div>
+          ${!isImported && !past ? `<button class="gcal-quick-add plan-edit" data-gcal-id="${ev.id}" data-gcal-summary="${ev.summary.replace(/"/g,'&quot;')}" data-gcal-time="${timeStr==='all day'?'':timeStr}" data-key="${key}" title="Add to plans" style="font-size:11px;color:rgba(160,200,255,0.7);flex-shrink:0">+</button>` : ''}
         </div>
-        ${!isImported && !past ? `<button class="gcal-quick-add plan-edit" data-gcal-id="${ev.id}" data-gcal-summary="${ev.summary.replace(/"/g,'&quot;')}" data-gcal-time="${timeStr==='all day'?'':timeStr}" data-key="${key}" title="Add to plans" style="font-size:11px;color:rgba(160,200,255,0.7)">+</button>` : ''}
+        <div class="gcal-tag-row" style="margin-top:6px;padding-left:18px">
+          <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:3px">
+            ${CATS.map(c => `<button class="gcal-tag-cat${tag.cat===c.id?' active':''}" data-gcal-id="${ev.id}" data-key="${key}" data-cat="${c.id}" style="font-size:8.5px;padding:1px 6px;border-radius:10px;border:1px solid ${tag.cat===c.id?c.hex+'88':'rgba(255,255,255,0.12)'};background:${tag.cat===c.id?c.hex+'22':'transparent'};color:${tag.cat===c.id?c.hex:'rgba(232,234,240,0.4)'};cursor:pointer">${c.label}</button>`).join('')}
+          </div>
+          ${friendsList.length ? `<div style="display:flex;flex-wrap:wrap;gap:3px">
+            ${friendsList.map(f => `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:8.5px;color:${tag.friends.includes(f.name)?f.color:'rgba(232,234,240,0.4)'}">
+              <input type="checkbox" class="gcal-tag-friend" data-gcal-id="${ev.id}" data-key="${key}" data-fname="${f.name}" ${tag.friends.includes(f.name)?'checked':''} style="accent-color:${f.color};width:10px;height:10px">
+              ${f.name}
+            </label>`).join('')}
+          </div>` : ''}
+        </div>
       </div>`;
     });
     html += `</div>`;
+  }
+
+  // Quick-add to GCal (future days, GCal connected)
+  if (!past && gcalConnected) {
+    html += `<div class="add-section" style="margin-top:4px">
+      <div class="section-label" style="color:rgba(160,200,255,0.6)">Add to Google Calendar</div>
+      <input class="add-input" id="gcal-new-title" placeholder="Event title" maxlength="80">
+      <div class="plan-row2">
+        <input class="add-input-sm" id="gcal-new-time" placeholder="Time (e.g. 7pm)">
+      </div>
+      <button class="add-btn" id="gcal-add-btn" style="background:rgba(160,200,255,0.15);border-color:rgba(160,200,255,0.3)">+ Add to GCal</button>
+    </div>`;
   }
 
   if (editingPlanIdx !== null && !past) {
@@ -674,6 +756,48 @@ function attachPanelEvents(key, plans, past) {
 
   const recapBtn = panel.querySelector('#recap-btn');
   if (recapBtn) recapBtn.addEventListener('click', () => generateRecap(panel));
+
+  // GCal tag: cat pills
+  panel.querySelectorAll('.gcal-tag-cat').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { gcalId, key: k, cat } = btn.dataset;
+      const tagKey = `${gcalId}::${k}`;
+      const cur = tagsData[tagKey] || { friends: [], cat: 'other' };
+      await saveTag(gcalId, k, cur.friends, cat);
+      renderPanel(k);
+    });
+  });
+
+  // GCal tag: friend checkboxes
+  panel.querySelectorAll('.gcal-tag-friend').forEach(cb => {
+    cb.addEventListener('change', async () => {
+      const { gcalId, key: k, fname } = cb.dataset;
+      const tagKey = `${gcalId}::${k}`;
+      const cur = tagsData[tagKey] || { friends: [], cat: 'other' };
+      const friends = cb.checked
+        ? [...new Set([...cur.friends, fname])]
+        : cur.friends.filter(f => f !== fname);
+      await saveTag(gcalId, k, friends, cur.cat);
+      tagsData[tagKey] = { friends, cat: cur.cat };
+    });
+  });
+
+  // Quick-add to GCal
+  const gcalAddBtn = panel.querySelector('#gcal-add-btn');
+  if (gcalAddBtn) gcalAddBtn.addEventListener('click', async () => {
+    const titleEl = panel.querySelector('#gcal-new-title');
+    const timeEl = panel.querySelector('#gcal-new-time');
+    const title = titleEl?.value.trim(); if (!title) return;
+    gcalAddBtn.disabled = true; gcalAddBtn.textContent = 'Adding…';
+    try {
+      await api('/api/gcal/create', 'POST', { date: key, title, time: timeEl?.value.trim() || '' });
+      if (titleEl) titleEl.value = '';
+      if (timeEl) timeEl.value = '';
+      await refreshGCalEvents(true);
+      if (selKey) renderPanel(selKey);
+    } catch {}
+    gcalAddBtn.disabled = false; gcalAddBtn.textContent = '+ Add to GCal';
+  });
 }
 
 // ── AI ────────────────────────────────────────────────────────
@@ -696,9 +820,10 @@ async function generateRecap(panel) {
   for (let mo = 8; mo <= 10; mo++) {
     const days = new Date(Y, mo + 1, 0).getDate();
     for (let d = 1; d <= days; d++) {
-      const p = allEvents[dayKey(Y,mo,d)] || [];
+      const key = dayKey(Y, mo, d);
+      const p = allEvents[key] || [];
       total += p.length;
-      if (p.some(x => x.friend && isConfirmed(x))) success++;
+      if (isSuccessDay(key)) success++;
     }
   }
   const freq = friendFrequency().slice(0, 5).map(([n,c]) => `${n}(${c}x)`).join(', ');
@@ -1085,9 +1210,10 @@ function renderInsights() {
   for (let mo = 8; mo <= 10; mo++) {
     const days = new Date(Y, mo + 1, 0).getDate();
     for (let d = 1; d <= days; d++) {
-      const p = allEvents[dayKey(Y,mo,d)] || [];
+      const key = dayKey(Y, mo, d);
+      const p = allEvents[key] || [];
       total += p.length;
-      if (p.some(x => x.friend && isConfirmed(x))) success++;
+      if (isSuccessDay(key)) success++;
     }
   }
   const topFriends = freq.slice(0, 5);

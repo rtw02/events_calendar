@@ -19,6 +19,13 @@ db.exec(`
     month_key TEXT PRIMARY KEY,
     target    INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS event_tags (
+    gcal_id  TEXT NOT NULL,
+    date_key TEXT NOT NULL,
+    friends  TEXT NOT NULL DEFAULT '[]',
+    cat      TEXT NOT NULL DEFAULT 'other',
+    PRIMARY KEY (gcal_id, date_key)
+  );
 `);
 
 const getEvents  = db.query("SELECT * FROM events");
@@ -30,6 +37,8 @@ const delFriend  = db.query("DELETE FROM friends WHERE id = $id");
 const getGoals   = db.query("SELECT * FROM goals");
 const setGoal    = db.query("INSERT OR REPLACE INTO goals (month_key, target) VALUES ($key, $target)");
 const delGoal    = db.query("DELETE FROM goals WHERE month_key = $key");
+const getTags    = db.query("SELECT * FROM event_tags");
+const setTag     = db.query("INSERT OR REPLACE INTO event_tags (gcal_id, date_key, friends, cat) VALUES ($gcalId, $dateKey, $friends, $cat)");
 
 // ── Google Calendar ───────────────────────────────────────────
 const TOKENS_FILE = "./gcal-tokens.json";
@@ -122,6 +131,15 @@ function weatherDesc(code: number): string {
   return 'Thunderstorm';
 }
 
+// ── GCal Helpers ─────────────────────────────────────────────
+function dateTimeToMinsNYC(dateTimeStr: string): number {
+  const d = new Date(dateTimeStr);
+  const nycStr = d.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
+  const parts = nycStr.split(":");
+  const h = parseInt(parts[0]), min = parseInt(parts[1] || "0");
+  return (isNaN(h) ? 0 : h) * 60 + (isNaN(min) ? 0 : min);
+}
+
 // ── GCal Time Parser ─────────────────────────────────────────
 function parseEventTime(date: string, timeStr?: string) {
   if (!timeStr || !timeStr.trim()) return { start: { date }, end: { date } };
@@ -198,6 +216,24 @@ async function api(req: Request, url: URL): Promise<Response> {
     const { target = 0 } = await readBody(req);
     if (target <= 0) delGoal.run({ $key: key });
     else setGoal.run({ $key: key, $target: target });
+    return json({ ok: true });
+  }
+
+  // ── Event Tags ──────────────────────────────────────────────
+  if (p === "/api/tags" && m === "GET") {
+    const rows = getTags.all() as { gcal_id: string; date_key: string; friends: string; cat: string }[];
+    const out: Record<string, { friends: string[]; cat: string }> = {};
+    rows.forEach(r => { out[`${r.gcal_id}::${r.date_key}`] = { friends: JSON.parse(r.friends), cat: r.cat }; });
+    return json(out);
+  }
+
+  if (p.startsWith("/api/tags/") && m === "PUT") {
+    const rest = p.slice("/api/tags/".length);
+    const lastSlash = rest.lastIndexOf("/");
+    const gcalId = decodeURIComponent(rest.slice(0, lastSlash));
+    const dateKey = rest.slice(lastSlash + 1);
+    const { friends = [], cat = "other" } = await readBody(req);
+    setTag.run({ $gcalId: gcalId, $dateKey: dateKey, $friends: JSON.stringify(friends), $cat: cat });
     return json({ ok: true });
   }
 
@@ -334,7 +370,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         orderBy: "startTime",
         maxResults: 500,
       });
-      const byDate: Record<string, { id: string; summary: string; start: string; end: string; allDay: boolean }[]> = {};
+      const byDate: Record<string, unknown[]> = {};
       for (const ev of res.data.items ?? []) {
         if (!ev.start || ev.status === "cancelled") continue;
         const allDay = !!ev.start.date;
@@ -347,6 +383,11 @@ async function api(req: Request, url: URL): Promise<Response> {
           start: ev.start.dateTime ? new Date(ev.start.dateTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
           end: ev.end?.dateTime ? new Date(ev.end.dateTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
           allDay,
+          startMin: ev.start.dateTime ? dateTimeToMinsNYC(ev.start.dateTime) : null,
+          endMin: ev.end?.dateTime ? dateTimeToMinsNYC(ev.end.dateTime) : null,
+          description: ev.description || null,
+          location: ev.location || null,
+          attendees: (ev.attendees ?? []).map((a: { displayName?: string; email?: string }) => a.displayName || a.email || "").filter(Boolean),
         };
         if (allDay && ev.end?.date && ev.end.date > rawStart) {
           // Expand multi-day all-day events (GCal end date is exclusive)
