@@ -22,6 +22,7 @@ let activeTab = 'calendar', editingPlanIdx = null;
 let gcalConnected = false, gcalEmail = null, gcalByDate = {};
 let weatherByDate = {};
 let gcalRefreshInterval = null;
+let weekStart = null;
 let lastViewStart = -1;
 let calendarRenderedOnce = false;
 const suggCache = {};
@@ -430,7 +431,6 @@ function renderCalendar() {
         });
         tile.appendChild(dots);
       }
-      // Weather badge (upcoming days only)
       const wx = weatherByDate[key];
       if (wx) {
         const wb = document.createElement('div'); wb.className = 'wx-badge';
@@ -460,6 +460,7 @@ function renderCalendar() {
 }
 
 function renderAll() {
+  if (activeTab === 'week') { renderWeekView(); updateStats(); return; }
   if (activeTab === 'friends') { renderFriendsBoard(); updateStats(); return; }
   if (activeTab === 'breakdown') { renderBreakdown(); updateStats(); return; }
   if (activeTab === 'insights') { renderInsights(); updateStats(); return; }
@@ -497,7 +498,9 @@ function renderPanel(key) {
     <div class="panel-date">${mo ? mo.name : ''} ${d}, ${Y}</div>
     <div class="panel-dow">${dayName}${past ? ' · Past' : ''}${success ? ' · <span style="color:var(--accent)">★ Success</span>' : ''}</div>
     ${wxStr ? `<div style="font-size:10px;color:var(--ink-3);margin-top:4px;display:flex;align-items:center;gap:4px">${wxStr}</div>` : ''}
+    ${wxWindowHtml(key)}
   </div>
+  ${dayTimelineHtml(key)}
   <div class="plans-section"><div class="section-label">Plans</div>`;
 
   if (!plans.length) {
@@ -1037,12 +1040,14 @@ function renderFriendsBoard() {
       html += `<div class="freq-row"><div class="freq-name">${name}</div><div class="freq-bar-wrap"><div class="freq-bar" style="width:${pct}%;background:${f?.color || '#78AADC'}"></div></div><div class="freq-count">${count}</div></div>`;
     });
   }
-  html += `</div><div class="add-section"><div class="section-label">Manage Friends</div>`;
+  html += `</div><div class="plans-section"><div class="section-label">Social graph · co-appearances</div><canvas class="social-canvas" id="social-canvas"></canvas></div>`;
+  html += `<div class="add-section"><div class="section-label">Manage Friends</div>`;
   friendsList.forEach((f, i) => {
     html += `<div class="friend-manage-row"><span class="friend-chip active" style="background:${f.color};color:#000;border-color:${f.color}">${f.name}</span><button class="plan-del" data-fi="${i}">×</button></div>`;
   });
   html += `<div class="plan-row2"><input class="add-input-sm" id="new-friend-name" placeholder="Friend's name"><button class="add-btn" id="add-friend-btn" style="flex-shrink:0">+ Add</button></div></div>`;
   panel.innerHTML = html;
+  requestAnimationFrame(() => { const c = document.getElementById('social-canvas'); if (c) drawSocialGraph(c); });
 
   panel.querySelectorAll('.plan-del[data-fi]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1235,6 +1240,9 @@ function renderInsights() {
     <div style="font-size:9.5px;color:var(--ink-3);margin-top:2px">Summer analysis · fall recommendations</div>
   </div>`;
 
+  // Radial season ring
+  html += `<div class="radial-wrap">${radialRingSVG()}</div>`;
+
   // Stats 3-up
   html += `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px">
     <div style="background:rgba(94,191,138,0.08);border:1px solid rgba(94,191,138,0.22);border-radius:8px;padding:8px 6px;text-align:center">
@@ -1300,6 +1308,12 @@ function renderInsights() {
     }
   }
   html += `</div></div>`;
+
+  // Time-of-day heatmap
+  html += timesOfDayHtml();
+
+  // Weather forecast overview
+  html += wxForecastHtml();
 
   // Smart recs
   html += `<div>
@@ -1379,6 +1393,360 @@ function renderInsights() {
   }
 }
 
+// ── Day Timeline ─────────────────────────────────────────────
+function dayTimelineHtml(key) {
+  const gcalEvts = gcalByDate[key] || [];
+  const timed = gcalEvts.filter(e => !e.allDay && e.startMin != null && e.endMin != null);
+  if (!timed.length) return '';
+  const [, mStr, dStr] = key.split('-');
+  const m = parseInt(mStr) - 1, d = parseInt(dStr);
+  const dow = new Date(Y, m, d).getDay();
+  const isWknd = dow === 0 || dow === 6;
+  const winS = isWknd ? 780 : 960, winE = isWknd ? 1380 : 1260;
+  const BASE = 360, SPAN = 1080; // 6am–midnight
+  const pct = min => ((min - BASE) / SPAN * 100).toFixed(2) + '%';
+  const plen = dur => (dur / SPAN * 100).toFixed(2) + '%';
+  const covered = isCoveredDay(key, gcalEvts);
+  // compute coverage pct in window
+  const ints = timed.map(ev => { const s = Math.max(ev.startMin, winS), e = Math.min(ev.endMin, winE); return s < e ? [s,e] : null; }).filter(Boolean);
+  ints.sort((a,b) => a[0]-b[0]);
+  let cov = 0, cs, ce;
+  if (ints.length) { [cs,ce]=ints[0]; for (let i=1;i<ints.length;i++){const[s,e]=ints[i];if(s<=ce)ce=Math.max(ce,e);else{cov+=ce-cs;cs=s;ce=e;}}cov+=ce-cs; }
+  const covPct = Math.round(cov / (winE - winS) * 100);
+  const TICKS = [360,480,600,720,840,960,1080,1200,1320,1440];
+  const TLABELS = {360:'6a',480:'8a',600:'10a',720:'12p',840:'2p',960:'4p',1080:'6p',1200:'8p',1320:'10p',1440:'12a'};
+  return `<div style="margin-bottom:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+      <div style="font-size:7.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(232,234,240,0.3)">Timeline · ${isWknd?'1–11pm':'4–9pm'} window</div>
+      <div style="font-size:8.5px;font-weight:700;color:${covered?'var(--accent)':'rgba(232,136,74,0.7)'}">${covPct}%</div>
+    </div>
+    <div class="day-tl-wrap">
+      <div class="day-tl-window" style="left:${pct(winS)};width:${plen(winE-winS)};background:rgba(94,191,138,${covered?'0.1':'0.04'});border-left:1px solid rgba(94,191,138,${covered?'0.3':'0.12'});border-right:1px solid rgba(94,191,138,${covered?'0.3':'0.12'})"></div>
+      ${timed.map(ev => {
+        const s=Math.max(ev.startMin,BASE),e=Math.min(ev.endMin,BASE+SPAN);
+        if(s>=BASE+SPAN||e<=BASE)return'';
+        const tagKey=`${ev.id}::${key}`;const tag=tagsData[tagKey]||{cat:'other'};
+        const cat=CATS.find(c=>c.id===tag.cat)||CATS[4];
+        return `<div class="day-tl-event" title="${ev.summary}" style="left:${pct(s)};width:${Math.max(parseFloat(plen(e-s)),0.5)}%;background:${cat.hex};opacity:0.8"></div>`;
+      }).join('')}
+      ${TICKS.map(h=>`<div class="day-tl-tick" style="left:${pct(h)}"></div><div class="day-tl-label" style="left:calc(${pct(h)} + 2px)">${TLABELS[h]}</div>`).join('')}
+    </div>
+  </div>`;
+}
+
+// ── Weather window breakdown (per-day panel) ──────────────────
+function wxWindowHtml(key) {
+  const wx = weatherByDate[key];
+  if (!wx || !wx.hourly || !Object.keys(wx.hourly).length) return '';
+  const [, mStr, dStr] = key.split('-');
+  const m = parseInt(mStr) - 1, d = parseInt(dStr);
+  const dow = new Date(Y, m, d).getDay();
+  const isWknd = dow === 0 || dow === 6;
+  const winS = isWknd ? 13 : 16, winE = isWknd ? 24 : 22;
+  const step = isWknd ? 2 : 1;
+  const slots = [];
+  for (let h = winS; h < winE; h += step) {
+    const entry = wx.hourly[h];
+    if (!entry) continue;
+    const label = h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`;
+    slots.push(`<div style="display:flex;flex-direction:column;align-items:center;gap:1px;min-width:30px">
+      <div style="font-size:7.5px;color:var(--ink-3)">${label}</div>
+      <div style="font-size:13px;line-height:1.2">${entry.emoji}</div>
+      <div style="font-size:9px;font-weight:700;color:var(--ink)">${entry.temp}°</div>
+      ${entry.precip > 30 ? `<div style="font-size:7px;color:#78AADC">${entry.precip}%</div>` : ''}
+    </div>`);
+  }
+  if (!slots.length) return '';
+  return `<div style="margin-top:5px;padding-top:5px;border-top:1px solid var(--border)">
+    <div style="font-size:7.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(232,234,240,0.3);margin-bottom:5px">Hourly · ${isWknd ? '1–11pm' : '4–9pm'} window</div>
+    <div style="display:flex;gap:4px;overflow-x:auto;padding-bottom:2px">${slots.join('')}</div>
+  </div>`;
+}
+
+// ── Weather forecast overview (insights panel) ────────────────
+function wxForecastHtml() {
+  const entries = Object.entries(weatherByDate).sort((a, b) => a[0].localeCompare(b[0]));
+  if (!entries.length) return '';
+  const MON_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  let goodCount = 0;
+  const cards = entries.map(([date, wx]) => {
+    const [Y2, m2, d2] = date.split('-').map(Number);
+    const dow = new Date(Y2, m2 - 1, d2).getDay();
+    const isWknd = dow === 0 || dow === 6;
+    const winS = isWknd ? 13 : 16, winE = isWknd ? 24 : 22;
+    const dayLabel = DAYS[dow].slice(0, 3);
+    const dateLabel = `${MON_ABBR[m2 - 1]} ${d2}`;
+    let winTemps = [], winMaxPrecip = 0;
+    for (let h = winS; h < winE; h++) {
+      const he = wx.hourly?.[h];
+      if (he) { winTemps.push(he.temp); winMaxPrecip = Math.max(winMaxPrecip, he.precip || 0); }
+    }
+    const winLo = winTemps.length ? Math.min(...winTemps) : null;
+    const winHi = winTemps.length ? Math.max(...winTemps) : null;
+    const isGreat = winMaxPrecip <= 20 && winHi !== null && winHi >= 52 && winHi <= 82;
+    const isRainy = winMaxPrecip > 50;
+    if (isGreat) goodCount++;
+    const border = isGreat ? 'rgba(94,191,138,0.4)' : isRainy ? 'rgba(120,170,220,0.35)' : 'var(--border)';
+    const bg = isGreat ? 'rgba(94,191,138,0.07)' : isRainy ? 'rgba(120,170,220,0.06)' : 'rgba(255,255,255,0.025)';
+    return `<div style="flex-shrink:0;width:68px;border:1px solid ${border};border-radius:10px;padding:8px 5px;background:${bg};text-align:center">
+      <div style="font-size:7.5px;font-weight:700;color:var(--ink-3);text-transform:uppercase;letter-spacing:.05em">${dayLabel}</div>
+      <div style="font-size:7.5px;color:var(--ink-3);margin-bottom:4px">${dateLabel}</div>
+      <div style="font-size:19px;line-height:1.2">${wx.emoji}</div>
+      <div style="font-size:9px;font-weight:700;color:var(--ink);margin-top:2px">${wx.hi}°/${wx.lo}°</div>
+      ${winLo !== null ? `
+        <div style="font-size:7px;color:var(--ink-3);margin-top:3px">${isWknd ? '1–11p' : '4–9p'}</div>
+        <div style="font-size:8.5px;font-weight:700;color:${isGreat ? 'var(--accent)' : isRainy ? '#78AADC' : 'var(--ink-3)'}">${winLo}–${winHi}°</div>` : ''}
+      ${winMaxPrecip > 20 ? `<div style="font-size:7.5px;color:#78AADC;margin-top:1px">💧${winMaxPrecip}%</div>`
+        : isGreat ? `<div style="font-size:7.5px;color:var(--accent);margin-top:2px;font-weight:700">✓</div>` : ''}
+    </div>`;
+  }).join('');
+  return `<div>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:5px">
+      <div class="section-label" style="margin-bottom:0">🌤 Weather forecast</div>
+      <div style="font-size:8.5px;color:var(--accent);font-weight:700">${goodCount} great day${goodCount !== 1 ? 's' : ''}</div>
+    </div>
+    <div style="font-size:8.5px;color:var(--ink-3);margin-bottom:8px">Plans window weather · next ${entries.length} days</div>
+    <div style="display:flex;gap:5px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin">${cards}</div>
+  </div>`;
+}
+
+// ── Week View ─────────────────────────────────────────────────
+function renderWeekView() {
+  const wrap = document.getElementById('week-wrap');
+  if (!wrap) return;
+  if (!weekStart) {
+    weekStart = new Date(todayMidnight);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+  }
+  const BASE = 360, END = 1440, SPAN = END - BASE;
+  const PX_PER_MIN = 50 / 60;
+  const TOTAL_H = SPAN * PX_PER_MIN;
+  const days = Array.from({length: 7}, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; });
+  const wLabel = days[0].toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' + days[6].toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  const DOWS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const HOUR_LABELS = {};
+  for (let h = 6; h <= 24; h++) HOUR_LABELS[h*60] = h===24?'12a':h<12?`${h}a`:h===12?'12p':`${h-12}p`;
+
+  const headerCols = `grid-template-columns: 36px repeat(7, 1fr)`;
+
+  const dayHeaders = days.map((d, di) => {
+    const k = dayKey(d.getFullYear(), d.getMonth(), d.getDate());
+    const isT = d.getTime() === todayMidnight.getTime();
+    const suc = isSuccessDay(k);
+    const hasEvts = (gcalByDate[k] || []).length > 0;
+    return `<div class="week-day-hdr" data-week-day="${k}">
+      <div style="font-size:8px;color:var(--ink-3);letter-spacing:0.05em;text-transform:uppercase">${DOWS[d.getDay()]}</div>
+      <div style="font-size:15px;font-weight:800;color:${isT?'var(--accent)':'var(--ink)'};line-height:1.2${isT?';text-shadow:0 0 12px rgba(94,191,138,0.5)':''}">${d.getDate()}</div>
+      <div style="width:5px;height:5px;border-radius:50%;margin:2px auto 0;background:${suc?'var(--accent)':hasEvts?'rgba(220,185,50,0.7)':'transparent'}"></div>
+    </div>`;
+  }).join('');
+
+  const cols = days.map((d, di) => {
+    const k = dayKey(d.getFullYear(), d.getMonth(), d.getDate());
+    const evts = gcalByDate[k] || [];
+    const dow = d.getDay();
+    const isWknd = dow === 0 || dow === 6;
+    const winS = isWknd ? 780 : 960, winE = isWknd ? 1380 : 1260;
+    const left = `calc(36px + ${di} * ((100% - 36px) / 7))`;
+    const width = `calc((100% - 36px) / 7)`;
+    const winTop = (Math.max(winS, BASE) - BASE) * PX_PER_MIN;
+    const winH = (winE - winS) * PX_PER_MIN;
+    const timedEvts = evts.filter(ev => !ev.allDay && ev.startMin != null);
+    const events = timedEvts.map(ev => {
+      const s = ev.startMin, e = ev.endMin ?? s + 60;
+      if (e <= BASE || s >= END) return '';
+      const top = (Math.max(s, BASE) - BASE) * PX_PER_MIN;
+      const h = (Math.min(e, END) - Math.max(s, BASE)) * PX_PER_MIN;
+      const tagKey = `${ev.id}::${k}`;
+      const tag = tagsData[tagKey] || {cat:'other'};
+      const cat = CATS.find(c => c.id === tag.cat) || CATS[4];
+      return `<div class="week-event" data-key="${k}" data-gcal-id="${ev.id}" style="left:1px;right:1px;top:${top.toFixed(1)}px;height:${Math.max(h,10).toFixed(1)}px;background:${cat.hex}cc;border:1px solid ${cat.hex};">
+        <div style="font-size:7.5px;font-weight:700;color:#000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.25">${ev.summary}</div>
+        ${h > 24 ? `<div style="font-size:6.5px;color:rgba(0,0,0,0.6)">${ev.start}${ev.end?'–'+ev.end:''}</div>` : ''}
+      </div>`;
+    }).join('');
+    return `<div style="position:absolute;top:0;bottom:0;left:${left};width:${width};border-left:1px solid rgba(255,255,255,0.06)">
+      <div style="position:absolute;left:0;right:0;top:${winTop.toFixed(1)}px;height:${winH.toFixed(1)}px;background:rgba(94,191,138,0.04);border-top:1px dashed rgba(94,191,138,0.15);border-bottom:1px dashed rgba(94,191,138,0.15);pointer-events:none"></div>
+      ${events}
+    </div>`;
+  }).join('');
+
+  // Hour lines + labels
+  const hourLines = [];
+  for (let h = 6; h <= 24; h++) {
+    const top = (h * 60 - BASE) * PX_PER_MIN;
+    const label = HOUR_LABELS[h*60] || '';
+    hourLines.push(`<div style="position:absolute;left:0;right:0;top:${top.toFixed(1)}px;height:1px;background:rgba(255,255,255,0.05)"></div>`);
+    hourLines.push(`<div style="position:absolute;left:0;width:36px;top:${top.toFixed(1)}px;font-size:7.5px;color:rgba(232,234,240,0.28);text-align:right;padding-right:5px;transform:translateY(-50%)">${label}</div>`);
+  }
+
+  // Today time line
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const todayKey2 = dayKey(now.getFullYear(), now.getMonth(), now.getDate());
+  const todayDi = days.findIndex(d => dayKey(d.getFullYear(), d.getMonth(), d.getDate()) === todayKey2);
+  const timeLine = todayDi >= 0 && nowMins >= BASE && nowMins < END ? (() => {
+    const top = (nowMins - BASE) * PX_PER_MIN;
+    const left = `calc(36px + ${todayDi} * ((100% - 36px) / 7))`;
+    const width = `calc((100% - 36px) / 7)`;
+    return `<div style="position:absolute;left:${left};width:${width};top:${top.toFixed(1)}px;height:2px;background:rgba(255,80,80,0.7);z-index:6;pointer-events:none">
+      <div style="position:absolute;left:-3px;top:-3px;width:7px;height:7px;border-radius:50%;background:rgba(255,80,80,0.85)"></div>
+    </div>`;
+  })() : '';
+
+  wrap.innerHTML = `<div style="display:flex;flex-direction:column;height:100%">
+    <div class="week-nav"><button id="week-prev" class="nav-btn">←</button><span class="week-range">${wLabel}</span><button id="week-next" class="nav-btn">→</button></div>
+    <div class="week-header-grid" style="${headerCols}"><div></div>${dayHeaders}</div>
+    <div class="week-body" id="week-body">
+      <div style="position:relative;height:${TOTAL_H}px">
+        ${hourLines.join('')}${cols}${timeLine}
+      </div>
+    </div>
+  </div>`;
+
+  requestAnimationFrame(() => {
+    const body = document.getElementById('week-body');
+    if (body) body.scrollTop = Math.max(0, (8 * 60 - BASE) * PX_PER_MIN - 40);
+  });
+
+  wrap.querySelector('#week-prev')?.addEventListener('click', () => { weekStart.setDate(weekStart.getDate()-7); renderWeekView(); });
+  wrap.querySelector('#week-next')?.addEventListener('click', () => { weekStart.setDate(weekStart.getDate()+7); renderWeekView(); });
+  wrap.querySelectorAll('[data-week-day]').forEach(el => el.addEventListener('click', () => selectDay(el.dataset.weekDay)));
+  wrap.querySelectorAll('.week-event').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); selectDay(el.dataset.key); }));
+}
+
+// ── Social Graph ──────────────────────────────────────────────
+function drawSocialGraph(canvas) {
+  const W = canvas.offsetWidth || 230, H = 160;
+  canvas.width = W * window.devicePixelRatio; canvas.height = H * window.devicePixelRatio;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  if (!friendsList.length) {
+    ctx.fillStyle = 'rgba(232,234,240,0.18)'; ctx.font = '11px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Add friends to see social graph', W/2, H/2); return;
+  }
+  // Co-occurrence
+  const pairCounts = {};
+  const nodeCounts = {};
+  Object.values(tagsData).forEach(tag => {
+    const fr = tag.friends || [];
+    fr.forEach(f => { nodeCounts[f] = (nodeCounts[f]||0)+1; });
+    for (let i=0;i<fr.length;i++) for (let j=i+1;j<fr.length;j++) {
+      const key = [fr[i],fr[j]].sort().join('|||');
+      pairCounts[key] = (pairCounts[key]||0)+1;
+    }
+  });
+  const nodes = friendsList.map(f => ({
+    id: f.name, color: f.color, freq: nodeCounts[f.name]||0,
+    x: W/2 + (Math.random()-0.5)*W*0.6, y: H/2 + (Math.random()-0.5)*H*0.6, vx:0, vy:0
+  }));
+  const edges = Object.entries(pairCounts).map(([k,w]) => { const [a,b]=k.split('|||'); return {a,b,w}; });
+  // Force sim
+  for (let iter=0; iter<180; iter++) {
+    nodes.forEach(n => { n.fx=0; n.fy=0; });
+    for (let i=0;i<nodes.length;i++) for (let j=i+1;j<nodes.length;j++) {
+      const dx=nodes[j].x-nodes[i].x, dy=nodes[j].y-nodes[i].y;
+      const dist=Math.sqrt(dx*dx+dy*dy)||1;
+      const f=700/(dist*dist);
+      const fx=f*dx/dist, fy=f*dy/dist;
+      nodes[i].fx-=fx; nodes[i].fy-=fy; nodes[j].fx+=fx; nodes[j].fy+=fy;
+    }
+    edges.forEach(e => {
+      const na=nodes.find(n=>n.id===e.a), nb=nodes.find(n=>n.id===e.b); if(!na||!nb) return;
+      const dx=nb.x-na.x, dy=nb.y-na.y, dist=Math.sqrt(dx*dx+dy*dy)||1;
+      const target=70/Math.sqrt(e.w), f=0.04*(dist-target);
+      const fx=f*dx/dist, fy=f*dy/dist;
+      na.fx+=fx; na.fy+=fy; nb.fx-=fx; nb.fy-=fy;
+    });
+    nodes.forEach(n => {
+      n.fx+=(W/2-n.x)*0.008; n.fy+=(H/2-n.y)*0.008;
+      n.vx=(n.vx+n.fx)*0.82; n.vy=(n.vy+n.fy)*0.82;
+      n.x=Math.max(18,Math.min(W-18,n.x+n.vx)); n.y=Math.max(18,Math.min(H-18,n.y+n.vy));
+    });
+  }
+  ctx.clearRect(0,0,W,H);
+  // Edges
+  edges.forEach(e => {
+    const na=nodes.find(n=>n.id===e.a), nb=nodes.find(n=>n.id===e.b); if(!na||!nb) return;
+    ctx.beginPath(); ctx.moveTo(na.x,na.y); ctx.lineTo(nb.x,nb.y);
+    ctx.strokeStyle=`rgba(255,255,255,${Math.min(0.08+0.06*e.w,0.35)})`; ctx.lineWidth=Math.min(e.w,3); ctx.stroke();
+  });
+  // Nodes
+  nodes.forEach(n => {
+    const r = Math.max(7, Math.min(7+n.freq*1.8, 18));
+    const grd=ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,r*2.2);
+    grd.addColorStop(0,n.color+'55'); grd.addColorStop(1,'transparent');
+    ctx.beginPath(); ctx.arc(n.x,n.y,r*2.2,0,Math.PI*2); ctx.fillStyle=grd; ctx.fill();
+    ctx.beginPath(); ctx.arc(n.x,n.y,r,0,Math.PI*2);
+    ctx.fillStyle=n.color+'dd'; ctx.fill();
+    ctx.strokeStyle=n.color; ctx.lineWidth=1.5; ctx.stroke();
+    if (n.freq>0) { ctx.font=`bold ${Math.round(r*0.8)}px Inter`; ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(n.freq,n.x,n.y); }
+    const name = n.id.length>9 ? n.id.slice(0,8)+'…' : n.id;
+    ctx.font=`${Math.round(r*0.75)}px Inter`; ctx.fillStyle='rgba(232,234,240,0.7)'; ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText(name, n.x, n.y+r+3);
+  });
+}
+
+// ── Radial Season Ring ────────────────────────────────────────
+function radialRingSVG() {
+  const cx=100, cy=108, R=82, r=52, DAYS=91;
+  let paths='', labels='', successTotal=0;
+  for (let i=0;i<DAYS;i++) {
+    const d=new Date(Y,8,1+i);
+    const k=dayKey(d.getFullYear(),d.getMonth(),d.getDate());
+    const past=d<todayMidnight, isT=d.getTime()===todayMidnight.getTime();
+    const suc=isSuccessDay(k);
+    const gcalEvts=gcalByDate[k]||[];
+    if (past&&suc) successTotal++;
+    let fill;
+    if (suc) fill=past?'rgba(94,191,138,0.75)':'rgba(94,191,138,0.9)';
+    else if (gcalEvts.length) fill=past?'rgba(220,185,50,0.5)':'rgba(220,185,50,0.7)';
+    else fill=past?'rgba(255,255,255,0.07)':'rgba(255,255,255,0.04)';
+    const sa=(i/DAYS*360-90)*Math.PI/180, ea=((i+1)/DAYS*360-90)*Math.PI/180;
+    const x1=cx+R*Math.cos(sa),y1=cy+R*Math.sin(sa),x2=cx+R*Math.cos(ea),y2=cy+R*Math.sin(ea);
+    const x3=cx+r*Math.cos(ea),y3=cy+r*Math.sin(ea),x4=cx+r*Math.cos(sa),y4=cy+r*Math.sin(sa);
+    const la=(ea-sa)>Math.PI?1:0;
+    const stroke=isT?'rgba(255,255,255,0.9)':'none', sw=isT?'1.5':'0';
+    paths+=`<path d="M${x1.toFixed(1)},${y1.toFixed(1)} A${R},${R} 0 ${la},1 ${x2.toFixed(1)},${y2.toFixed(1)} L${x3.toFixed(1)},${y3.toFixed(1)} A${r},${r} 0 ${la},0 ${x4.toFixed(1)},${y4.toFixed(1)} Z" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"><title>${k}${suc?' ★':''}</title></path>`;
+  }
+  // Month dividers + labels
+  const moStarts=[0,30,61], moMids=[15,45.5,75.5], moNames=['Sep','Oct','Nov'];
+  moStarts.forEach(i => {
+    const a=(i/DAYS*360-90)*Math.PI/180;
+    paths+=`<line x1="${(cx+(r-5)*Math.cos(a)).toFixed(1)}" y1="${(cy+(r-5)*Math.sin(a)).toFixed(1)}" x2="${(cx+(R+5)*Math.cos(a)).toFixed(1)}" y2="${(cy+(R+5)*Math.sin(a)).toFixed(1)}" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>`;
+  });
+  moMids.forEach((mi,i) => {
+    const a=(mi/DAYS*360-90)*Math.PI/180, lr=R+13;
+    labels+=`<text x="${(cx+lr*Math.cos(a)).toFixed(1)}" y="${(cy+lr*Math.sin(a)).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="rgba(232,234,240,0.5)" font-size="8" font-weight="700" font-family="Inter,system-ui">${moNames[i]}</text>`;
+  });
+  return `<svg viewBox="0 0 200 220" width="200" height="220">${paths}${labels}
+    <text x="${cx}" y="${cy-6}" text-anchor="middle" fill="rgba(232,234,240,0.8)" font-size="22" font-weight="800" font-family="Inter,system-ui">${successTotal}</text>
+    <text x="${cx}" y="${cy+12}" text-anchor="middle" fill="rgba(232,234,240,0.35)" font-size="7.5" font-weight="700" font-family="Inter,system-ui" letter-spacing="0.12em">WINS SO FAR</text>
+  </svg>`;
+}
+
+// ── Time-of-Day Heatmap ───────────────────────────────────────
+function timesOfDayHtml() {
+  const counts = Array(7).fill(null).map(()=>Array(24).fill(0));
+  Object.entries(gcalByDate).forEach(([date,evts]) => {
+    const [yr,mo,d]=date.split('-').map(Number);
+    const dow=new Date(yr,mo-1,d).getDay();
+    evts.forEach(ev => { if(!ev.allDay&&ev.startMin!=null){const h=Math.floor(ev.startMin/60)%24;if(h>=0&&h<24)counts[dow][h]++;} });
+  });
+  const maxC=Math.max(1,...counts.flat());
+  const DOWS=['Su','Mo','Tu','We','Th','Fr','Sa'];
+  const hourLabels=Array(24).fill('').map((_,h)=>{
+    if(h===0)return'12a'; if(h===6)return'6a'; if(h===12)return'12p'; if(h===18)return'6p'; if(h===23)return''; return'';
+  });
+  return `<div>
+    <div class="section-label" style="margin-bottom:5px">When you're out · hour × weekday</div>
+    <div class="tod-grid" style="grid-template-columns:18px repeat(24,1fr)">
+      <div></div>${hourLabels.map(l=>`<div style="font-size:6px;color:rgba(232,234,240,0.3);text-align:center;padding-bottom:2px">${l}</div>`).join('')}
+      ${DOWS.map((dw,di)=>`<div style="font-size:6.5px;color:rgba(232,234,240,0.35);display:flex;align-items:center;justify-content:flex-end;padding-right:2px">${dw}</div>${counts[di].map(n=>{const a=n===0?0.05:0.12+(n/maxC)*0.72;return`<div style="aspect-ratio:1;border-radius:2px;background:rgba(94,191,138,${a.toFixed(2)})" title="${n}"></div>`;}).join('')}`).join('')}
+    </div>
+  </div>`;
+}
+
 // ── Nav ───────────────────────────────────────────────────────
 document.getElementById('nav-prev').addEventListener('click', () => { if (viewStart > 0) { viewStart--; renderCalendar(); } });
 document.getElementById('nav-next').addEventListener('click', () => { if (viewStart < 1) { viewStart++; renderCalendar(); } });
@@ -1389,8 +1757,17 @@ document.getElementById('tab-row').querySelectorAll('.tab-btn').forEach(btn => {
     activeTab = btn.dataset.tab;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
     const mw = document.getElementById('months-wrap');
-    if (mw) mw.style.display = activeTab === 'calendar' ? '' : 'none';
-    if (activeTab === 'friends') { renderFriendsBoard(); openPanel(); }
+    const monthsNav = document.querySelector('.months-nav');
+    const monthsDiv = document.getElementById('months');
+    const weekWrap = document.getElementById('week-wrap');
+    const isWeek = activeTab === 'week';
+    const isCalendar = activeTab === 'calendar';
+    if (mw) mw.style.display = (isCalendar || isWeek) ? '' : 'none';
+    if (monthsNav) monthsNav.style.display = isWeek ? 'none' : '';
+    if (monthsDiv) monthsDiv.style.display = isWeek ? 'none' : '';
+    if (weekWrap) weekWrap.style.display = isWeek ? 'flex' : 'none';
+    if (activeTab === 'week') { renderWeekView(); if (selKey) { renderPanel(selKey); openPanel(); } else closePanel(); }
+    else if (activeTab === 'friends') { renderFriendsBoard(); openPanel(); }
     else if (activeTab === 'breakdown') { renderBreakdown(); openPanel(); }
     else if (activeTab === 'insights') { renderInsights(); openPanel(); }
     else {

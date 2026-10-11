@@ -415,21 +415,29 @@ async function api(req: Request, url: URL): Promise<Response> {
     try {
       const today = new Date().toISOString().slice(0, 10);
       const end = new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10);
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.0060&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max&timezone=America%2FNew_York&temperature_unit=fahrenheit&start_date=${today}&end_date=${end}`;
-      const res = await fetch(url);
-      if (!res.ok) return json({ byDate: {} });
-      const data = await res.json() as { daily: { time: string[]; temperature_2m_max: number[]; temperature_2m_min: number[]; weathercode: number[]; precipitation_probability_max: number[] } };
-      const byDate: Record<string, { hi: number; lo: number; code: number; emoji: string; desc: string; precip: number }> = {};
-      data.daily.time?.forEach((date, i) => {
-        byDate[date] = {
-          hi: Math.round(data.daily.temperature_2m_max[i]),
-          lo: Math.round(data.daily.temperature_2m_min[i]),
-          code: data.daily.weathercode[i],
-          emoji: weatherEmoji(data.daily.weathercode[i]),
-          desc: weatherDesc(data.daily.weathercode[i]),
-          precip: data.daily.precipitation_probability_max[i] ?? 0,
-        };
+      const baseUrl = `https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.0060&timezone=America%2FNew_York&temperature_unit=fahrenheit&start_date=${today}&end_date=${end}`;
+      const [dailyRes, hourlyRes] = await Promise.all([
+        fetch(baseUrl + "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max"),
+        fetch(baseUrl + "&hourly=temperature_2m,weathercode,precipitation_probability"),
+      ]);
+      if (!dailyRes.ok) return json({ byDate: {} });
+      const dailyData = await dailyRes.json() as { daily: { time: string[]; temperature_2m_max: number[]; temperature_2m_min: number[]; weathercode: number[]; precipitation_probability_max: number[] } };
+      type HourEntry = { temp: number; code: number; emoji: string; precip: number };
+      type DayEntry = { hi: number; lo: number; code: number; emoji: string; desc: string; precip: number; hourly: Record<number, HourEntry> };
+      const byDate: Record<string, DayEntry> = {};
+      dailyData.daily.time?.forEach((date, i) => {
+        byDate[date] = { hi: Math.round(dailyData.daily.temperature_2m_max[i]), lo: Math.round(dailyData.daily.temperature_2m_min[i]), code: dailyData.daily.weathercode[i], emoji: weatherEmoji(dailyData.daily.weathercode[i]), desc: weatherDesc(dailyData.daily.weathercode[i]), precip: dailyData.daily.precipitation_probability_max[i] ?? 0, hourly: {} };
       });
+      if (hourlyRes.ok) {
+        const hourlyData = await hourlyRes.json() as { hourly: { time: string[]; temperature_2m: number[]; weathercode: number[]; precipitation_probability: number[] } };
+        hourlyData.hourly.time?.forEach((timeStr, i) => {
+          const date = timeStr.slice(0, 10);
+          const hour = parseInt(timeStr.slice(11, 13));
+          if (byDate[date]) {
+            byDate[date].hourly[hour] = { temp: Math.round(hourlyData.hourly.temperature_2m[i]), code: hourlyData.hourly.weathercode[i], emoji: weatherEmoji(hourlyData.hourly.weathercode[i]), precip: hourlyData.hourly.precipitation_probability[i] ?? 0 };
+          }
+        });
+      }
       return json({ byDate });
     } catch (e) { return json({ byDate: {} }); }
   }
