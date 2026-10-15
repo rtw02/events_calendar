@@ -35,3 +35,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Google OAuth tokens (contains refresh token — never commit)
 gcal-tokens.json
+
+# Local SQLite database
+fall-calendar.db
+
+# Claude Code local config
+.claude/
