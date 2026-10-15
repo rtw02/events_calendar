@@ -26,6 +26,10 @@ db.exec(`
     cat      TEXT NOT NULL DEFAULT 'other',
     PRIMARY KEY (gcal_id, date_key)
   );
+  CREATE TABLE IF NOT EXISTS day_notes (
+    date_key TEXT PRIMARY KEY,
+    note     TEXT NOT NULL DEFAULT ''
+  );
 `);
 
 const getEvents  = db.query("SELECT * FROM events");
@@ -39,6 +43,8 @@ const setGoal    = db.query("INSERT OR REPLACE INTO goals (month_key, target) VA
 const delGoal    = db.query("DELETE FROM goals WHERE month_key = $key");
 const getTags    = db.query("SELECT * FROM event_tags");
 const setTag     = db.query("INSERT OR REPLACE INTO event_tags (gcal_id, date_key, friends, cat) VALUES ($gcalId, $dateKey, $friends, $cat)");
+const getNotes   = db.query("SELECT date_key, note FROM day_notes");
+const setNote    = db.query("INSERT OR REPLACE INTO day_notes (date_key, note) VALUES ($dateKey, $note)");
 
 // ── Google Calendar ───────────────────────────────────────────
 const TOKENS_FILE = "./gcal-tokens.json";
@@ -234,6 +240,21 @@ async function api(req: Request, url: URL): Promise<Response> {
     const dateKey = rest.slice(lastSlash + 1);
     const { friends = [], cat = "other" } = await readBody(req);
     setTag.run({ $gcalId: gcalId, $dateKey: dateKey, $friends: JSON.stringify(friends), $cat: cat });
+    return json({ ok: true });
+  }
+
+  // ── Day Notes ───────────────────────────────────────────────
+  if (p === "/api/notes" && m === "GET") {
+    const rows = getNotes.all() as { date_key: string; note: string }[];
+    const out: Record<string, string> = {};
+    rows.forEach(r => { out[r.date_key] = r.note; });
+    return json({ notes: out });
+  }
+
+  if (p.startsWith("/api/notes/") && m === "PUT") {
+    const dateKey = p.slice("/api/notes/".length);
+    const { note = "" } = await readBody(req);
+    setNote.run({ $dateKey: dateKey, $note: note });
     return json({ ok: true });
   }
 
@@ -452,7 +473,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         max_tokens: 800,
         messages: [{
           role: "user",
-          content: `You are analyzing a New Yorker's fall 2026 social calendar (Sep–Nov). Their data: ${plans}. Top activity categories: ${topCats}. Friends they hang out with: ${friends}. Generate 5 smart, specific fall recommendations for NYC. Make them personal based on their actual patterns. Format as JSON only: {"recs":[{"icon":"emoji","title":"short title","why":"1-2 sentences","cat":"upstate|fair|halloween|friendsgiving|other","suggestDate":"YYYY-MM-DD or null","planName":"short plan name"}]}`,
+          content: `You are a NYC social calendar assistant. Generate exactly 5 fall 2026 recommendations for a New Yorker. Always return 5 recs regardless of data quantity — if data is sparse, generate general NYC fall suggestions. User data: plans="${plans || 'none yet'}". Categories: "${topCats || 'none'}". Friends: "${friends || 'none'}". Return ONLY raw JSON, no commentary, no preamble: {"recs":[{"icon":"emoji","title":"short title under 40 chars","why":"1-2 sentences personal to their data or general NYC if sparse","cat":"upstate|fair|halloween|friendsgiving|other","suggestDate":"2026-MM-DD or null","planName":"short plan name"}]}`,
         }],
       });
       const raw = msg.content[0].type === "text" ? msg.content[0].text : "{}";

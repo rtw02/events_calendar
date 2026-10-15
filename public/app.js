@@ -16,7 +16,7 @@ const Y = 2026;
 const FRIEND_COLORS = ['#5EBF8A','#E8884A','#B07FD8','#78AADC','#E87878','#c8a84b','#78DCB0','#DC7878'];
 
 // ── State ─────────────────────────────────────────────────────
-let allEvents = {}, goalsData = {}, friendsList = [], tagsData = {};
+let allEvents = {}, goalsData = {}, friendsList = [], tagsData = {}, notesData = {};
 let selKey = null, selCat = 'other', selFriendId = null, isFriend = true, viewStart = 0;
 let activeTab = 'calendar', editingPlanIdx = null;
 let gcalConnected = false, gcalEmail = null, gcalByDate = {};
@@ -123,17 +123,19 @@ async function api(path, method = 'GET', body) {
 }
 
 async function loadAll() {
-  const [evts, frnds, goals, tags] = await Promise.all([
+  const [evts, frnds, goals, tags, notes] = await Promise.all([
     api('/api/events'),
     api('/api/friends'),
     api('/api/goals'),
     fetch('/api/tags').then(r => r.json()).catch(() => ({})),
+    fetch('/api/notes').then(r => r.json()).catch(() => ({ notes: {} })),
   ]);
   allEvents = evts || {};
   Object.keys(allEvents).forEach(k => { allEvents[k] = sortPlans(allEvents[k]); });
   friendsList = frnds || [];
   goalsData = goals || {};
   tagsData = tags || {};
+  notesData = notes?.notes || {};
   renderAll();
   // Weather (non-blocking)
   fetch('/api/weather').then(r => r.json()).then(w => {
@@ -234,6 +236,37 @@ function calcGaps() {
   }
   if (gapLen >= 5) gaps.push({ len: gapLen, start: gapStart });
   return gaps;
+}
+
+function friendDebtMap() {
+  const lastSeen = {};
+  Object.entries(tagsData).forEach(([tagKey, tag]) => {
+    const parts = tagKey.split('::');
+    const dateKey = parts[parts.length - 1];
+    if (!dateKey.match(/^\d{4}-\d{2}-\d{2}$/)) return;
+    (tag.friends || []).forEach(name => {
+      if (!lastSeen[name] || dateKey > lastSeen[name]) lastSeen[name] = dateKey;
+    });
+  });
+  Object.entries(allEvents).forEach(([dateKey, plans]) => {
+    plans.forEach(p => {
+      if (p.friendName) {
+        if (!lastSeen[p.friendName] || dateKey > lastSeen[p.friendName]) lastSeen[p.friendName] = dateKey;
+      }
+    });
+  });
+  const result = {};
+  friendsList.forEach(f => {
+    const ls = lastSeen[f.name];
+    if (ls) {
+      const [fy, fm, fd] = ls.split('-').map(Number);
+      const diff = Math.max(0, Math.floor((todayMidnight - new Date(fy, fm - 1, fd)) / 864e5));
+      result[f.id] = { name: f.name, color: f.color, daysSince: diff, lastDate: ls };
+    } else {
+      result[f.id] = { name: f.name, color: f.color, daysSince: null, lastDate: null };
+    }
+  });
+  return result;
 }
 
 function friendFrequency() {
@@ -349,6 +382,10 @@ function updateStats() {
   const streak = calcStreak();
   const se = document.getElementById('stat-streak');
   if (se) { countUp(se, streak); se.classList.toggle('streak-fire', streak >= 3); }
+  const fallEnd = new Date(Y, 11, 1);
+  const daysToEnd = Math.max(0, Math.ceil((fallEnd - todayMidnight) / 864e5));
+  const ce = document.getElementById('stat-countdown');
+  if (ce) countUp(ce, daysToEnd);
   const gapEl = document.getElementById('gap-alert');
   if (gapEl) {
     const gaps = calcGaps();
@@ -437,7 +474,13 @@ function renderCalendar() {
         const we = document.createElement('span'); we.className = 'wx-emoji'; we.textContent = wx.emoji;
         const wt = document.createElement('span'); wt.className = 'wx-temp'; wt.textContent = `${wx.hi}°`;
         wb.appendChild(we); wb.appendChild(wt); tile.appendChild(wb);
+        // Rain alert: plans or gcal events + high precip in window
+        if (!past && wx.precip > 60 && (plans.length > 0 || gcalEvts.length > 0)) {
+          const ra = document.createElement('div'); ra.className = 'rain-alert'; ra.textContent = '🌧'; ra.title = `${wx.precip}% rain – plans may be affected`; tile.appendChild(ra);
+        }
       }
+      // Note dot
+      if (notesData[key]) { const nd = document.createElement('div'); nd.className = 'note-dot'; tile.appendChild(nd); }
       if (!past) tile.addEventListener('click', (e) => {
         addRipple(tile, e);
         if (selKey === key) { selKey = null; closePanel(); renderCalendar(); }
@@ -473,8 +516,19 @@ function closePanel() { document.getElementById('panel-wrap').classList.remove('
 function selectDay(key) {
   selKey = key;
   activeTab = 'calendar';
-  document.querySelector('.tab-btn[data-tab="calendar"]')?.classList.add('active');
-  document.getElementById('months-wrap').style.display = '';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === 'calendar'));
+  const mw = document.getElementById('months-wrap');
+  const monthsNav = document.querySelector('.months-nav');
+  const monthsDiv = document.getElementById('months');
+  const weekWrap = document.getElementById('week-wrap');
+  if (mw) mw.style.display = '';
+  if (monthsNav) monthsNav.style.display = '';
+  if (monthsDiv) monthsDiv.style.display = '';
+  if (weekWrap) weekWrap.style.display = 'none';
+  // navigate to the month containing this key
+  const km = parseInt(key.split('-')[1]) - 1;
+  const idx = MONTHS.findIndex(x => x.m === km);
+  if (idx >= 0) viewStart = Math.min(Math.max(idx - (idx > 0 ? 1 : 0), 0), MONTHS.length - 2);
   renderCalendar();
   renderPanel(key);
   openPanel();
@@ -639,6 +693,12 @@ function renderPanel(key) {
 
   if (m === 10) html += `<button class="recap-btn" id="recap-btn">✦ Generate Season Recap</button>`;
 
+  // Per-day notes
+  html += `<div class="plans-section">
+    <div class="section-label">Notes</div>
+    <textarea id="day-note" rows="3" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;color:var(--ink);font-size:10.5px;padding:7px 9px;resize:vertical;font-family:inherit;outline:none" placeholder="Jot something down…">${(notesData[key] || '').replace(/</g,'&lt;')}</textarea>
+  </div>`;
+
   panel.innerHTML = html;
   attachPanelEvents(key, plans, past);
 }
@@ -801,6 +861,17 @@ function attachPanelEvents(key, plans, past) {
     } catch {}
     gcalAddBtn.disabled = false; gcalAddBtn.textContent = '+ Add to GCal';
   });
+
+  // Day notes auto-save
+  const noteEl = panel.querySelector('#day-note');
+  if (noteEl) {
+    noteEl.addEventListener('blur', async () => {
+      const note = noteEl.value;
+      notesData[key] = note;
+      await fetch(`/api/notes/${key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
+      renderCalendar(); // refresh note dot
+    });
+  }
 }
 
 // ── AI ────────────────────────────────────────────────────────
@@ -1029,7 +1100,8 @@ async function showGCalSync() {
 function renderFriendsBoard() {
   const panel = document.getElementById('panel');
   const freq = friendFrequency();
-  let html = `<div class="panel-head"><div class="panel-date">Friends</div><div class="panel-dow">Hangout frequency this fall</div></div>`;
+  const debt = friendDebtMap();
+  let html = `<div class="panel-head"><div class="panel-date">Friends</div><div class="panel-dow">Hangout frequency · last seen</div></div>`;
   html += `<div class="plans-section">`;
   if (!freq.length) html += `<div style="font-size:10.5px;color:var(--ink-3);font-style:italic">No friend data yet.</div>`;
   else {
@@ -1037,7 +1109,36 @@ function renderFriendsBoard() {
     freq.forEach(([name, count]) => {
       const f = friendsList.find(x => x.name === name);
       const pct = Math.round((count / max) * 100);
-      html += `<div class="freq-row"><div class="freq-name">${name}</div><div class="freq-bar-wrap"><div class="freq-bar" style="width:${pct}%;background:${f?.color || '#78AADC'}"></div></div><div class="freq-count">${count}</div></div>`;
+      const d = f ? debt[f.id] : null;
+      let debtBadge = '';
+      if (d) {
+        const ds = d.daysSince;
+        if (ds === null) {
+          debtBadge = `<span style="font-size:7.5px;padding:1px 5px;border-radius:20px;background:rgba(255,255,255,0.06);color:var(--ink-3);margin-left:4px">never</span>`;
+        } else {
+          const label = ds === 0 ? 'today' : ds === 1 ? '1d' : ds < 7 ? `${ds}d` : ds < 14 ? '1w' : ds < 21 ? '2w' : ds < 30 ? '3w' : `${Math.round(ds/7)}w`;
+          const col = ds <= 3 ? 'rgba(94,191,138,0.85)' : ds <= 10 ? 'rgba(200,168,75,0.85)' : 'rgba(232,136,74,0.85)';
+          debtBadge = `<span style="font-size:7.5px;padding:1px 5px;border-radius:20px;background:${col}22;color:${col};border:1px solid ${col}44;margin-left:4px">${label}</span>`;
+        }
+      }
+      html += `<div class="freq-row"><div class="freq-name" style="display:flex;align-items:center">${name}${debtBadge}</div><div class="freq-bar-wrap"><div class="freq-bar" style="width:${pct}%;background:${f?.color || '#78AADC'}"></div></div><div class="freq-count">${count}</div></div>`;
+    });
+  }
+  // Friend debt section — friends overdue for a hang
+  const overdue = friendsList.map(f => ({ f, d: debt[f.id] })).filter(({ d }) => d && d.daysSince !== null && d.daysSince > 7).sort((a, b) => b.d.daysSince - a.d.daysSince);
+  if (overdue.length) {
+    html += `</div><div class="plans-section"><div class="section-label">Overdue hangs</div>`;
+    overdue.forEach(({ f, d }) => {
+      const ds = d.daysSince;
+      const label = ds < 14 ? '1 week' : ds < 21 ? '2 weeks' : ds < 30 ? '3 weeks' : `${Math.round(ds / 7)} weeks`;
+      const urgency = ds > 21 ? 'rgba(232,136,74,0.85)' : 'rgba(200,168,75,0.75)';
+      html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:7px">
+          <div style="width:8px;height:8px;border-radius:50%;background:${f.color};flex-shrink:0"></div>
+          <div style="font-size:11px;font-weight:600;color:var(--ink)">${f.name}</div>
+        </div>
+        <div style="font-size:8.5px;color:${urgency};font-weight:700">${label} ago</div>
+      </div>`;
     });
   }
   html += `</div><div class="plans-section"><div class="section-label">Social graph · co-appearances</div><canvas class="social-canvas" id="social-canvas"></canvas></div>`;
@@ -1071,22 +1172,56 @@ function renderFriendsBoard() {
 }
 
 // ── Breakdown ─────────────────────────────────────────────────
+function getCatGoals() {
+  try { return JSON.parse(localStorage.getItem('catGoals2026') || '{}'); } catch { return {}; }
+}
+function saveCatGoals(g) { try { localStorage.setItem('catGoals2026', JSON.stringify(g)); } catch {} }
+
 function renderBreakdown() {
   const panel = document.getElementById('panel');
   const counts = catBreakdown();
+  const goals = getCatGoals();
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  let html = `<div class="panel-head"><div class="panel-date">Breakdown</div><div class="panel-dow">All plans by category</div></div><div class="plans-section">`;
+  let html = `<div class="panel-head"><div class="panel-date">Breakdown</div><div class="panel-dow">Plans by category · tap to set goal</div></div><div class="plans-section">`;
   if (!total) html += `<div style="font-size:10.5px;color:var(--ink-3);font-style:italic">No plans yet.</div>`;
   else {
     CATS.forEach(cat => {
-      const n = counts[cat.id] || 0; if (!n) return;
-      const pct = Math.round((n / total) * 100);
-      html += `<div class="freq-row"><div class="freq-name" style="font-size:12px">${cat.label}</div><div class="freq-bar-wrap"><div class="freq-bar" style="width:${pct}%;background:${cat.hex}"></div></div><div class="freq-count">${n}</div></div>`;
+      const n = counts[cat.id] || 0;
+      const goal = goals[cat.id] || 0;
+      const pct = total ? Math.round((n / total) * 100) : 0;
+      const goalPct = goal ? Math.min(Math.round((n / goal) * 100), 100) : 0;
+      const met = goal > 0 && n >= goal;
+      html += `<div class="freq-row" style="flex-wrap:wrap">
+        <div class="freq-name" style="font-size:12px;width:100%;display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">
+          <span>${cat.label}</span>
+          <div style="display:flex;align-items:center;gap:5px">
+            ${goal > 0 ? `<span style="font-size:8px;color:${met?'var(--accent)':'var(--ink-3)'};font-weight:700">${n}/${goal}${met?' ✓':''}</span>` : `<span style="font-size:9.5px;font-weight:700;color:var(--ink)">${n}</span>`}
+            <button class="goal-set-btn" data-cat="${cat.id}" style="font-size:8px;padding:1px 5px;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--ink-3);cursor:pointer">goal</button>
+          </div>
+        </div>
+        <div class="freq-bar-wrap" style="flex:1">
+          <div class="freq-bar" style="width:${pct}%;background:${cat.hex}66;position:relative">
+            ${goal > 0 ? `<div style="position:absolute;top:0;left:0;height:100%;width:${goalPct}%;background:${cat.hex};border-radius:inherit"></div>` : ''}
+          </div>
+        </div>
+      </div>`;
     });
     html += `<div style="font-size:10px;color:var(--ink-3);margin-top:8px">${total} plans total</div>`;
   }
   html += `</div>`;
   panel.innerHTML = html;
+  panel.querySelectorAll('.goal-set-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const g = getCatGoals();
+      const cur = g[btn.dataset.cat] || 0;
+      const val = prompt(`Goal for ${btn.dataset.cat} (0 to clear):`, cur);
+      if (val === null) return;
+      const n = parseInt(val);
+      if (isNaN(n) || n <= 0) { delete g[btn.dataset.cat]; } else { g[btn.dataset.cat] = n; }
+      saveCatGoals(g);
+      renderBreakdown();
+    });
+  });
 }
 
 // ── Export ────────────────────────────────────────────────────
@@ -1240,6 +1375,12 @@ function renderInsights() {
     <div style="font-size:9.5px;color:var(--ink-3);margin-top:2px">Summer analysis · fall recommendations</div>
   </div>`;
 
+  // Golden combo
+  html += goldenComboHtml();
+
+  // Free windows
+  html += freeWindowsHtml();
+
   // Radial season ring
   html += `<div class="radial-wrap">${radialRingSVG()}</div>`;
 
@@ -1258,6 +1399,9 @@ function renderInsights() {
       <div style="font-size:7.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:3px">${streak>=3?'🔥 Streak':'Streak'}</div>
     </div>
   </div>`;
+
+  // Plan velocity
+  html += velocitySparklineHtml();
 
   // Top crew
   if (topFriends.length) {
@@ -1309,8 +1453,14 @@ function renderInsights() {
   }
   html += `</div></div>`;
 
+  // Recurring patterns
+  html += recurringPatternsHtml();
+
   // Time-of-day heatmap
   html += timesOfDayHtml();
+
+  // Bucket list
+  html += bucketListHtml();
 
   // Weather forecast overview
   html += wxForecastHtml();
@@ -1350,6 +1500,41 @@ function renderInsights() {
 
   panel.innerHTML = html;
 
+  panel.querySelectorAll('.free-window-card, .golden-open').forEach(card => {
+    card.addEventListener('click', () => selectDay(card.dataset.key));
+  });
+
+  panel.querySelectorAll('.bucket-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const items = getBucketList();
+      items[parseInt(cb.dataset.i)].checked = cb.checked;
+      saveBucketList(items);
+      renderInsights();
+    });
+  });
+  panel.querySelectorAll('.bucket-del').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      const items = getBucketList();
+      items.splice(parseInt(btn.dataset.i), 1);
+      saveBucketList(items);
+      renderInsights();
+    });
+  });
+  const bucketAdd = panel.querySelector('#bucket-add');
+  const bucketInp = panel.querySelector('#bucket-inp');
+  if (bucketAdd && bucketInp) {
+    const doAdd = () => {
+      const text = bucketInp.value.trim(); if (!text) return;
+      const items = getBucketList();
+      items.push({ id: `u${Date.now()}`, text, checked: false });
+      saveBucketList(items);
+      renderInsights();
+    };
+    bucketAdd.addEventListener('click', doAdd);
+    bucketInp.addEventListener('keydown', e => { if (e.key === 'Enter') doAdd(); });
+  }
+
   panel.querySelectorAll('.insight-plan-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const { date, name, cat } = btn.dataset;
@@ -1386,8 +1571,15 @@ function renderInsights() {
               btn.textContent = '✓ Added'; btn.disabled = true;
             });
           });
+        } else if (data.error) {
+          recsList.innerHTML = `<div style="font-size:9.5px;color:var(--ink-3);font-style:italic;padding:8px 0">${data.error}</div>`;
+        } else {
+          recsList.innerHTML = `<div style="font-size:9.5px;color:var(--ink-3);font-style:italic;padding:8px 0">No recs generated — try adding more plans first.</div>`;
         }
-      } catch {}
+      } catch (e) {
+        const recsList2 = panel.querySelector('#recs-list');
+        if (recsList2) recsList2.innerHTML = `<div style="font-size:9.5px;color:rgba(232,136,74,0.7);padding:8px 0">Failed to load recs. Check ANTHROPIC_API_KEY.</div>`;
+      }
       refreshBtn.textContent = '✦ Refresh'; refreshBtn.disabled = false;
     });
   }
@@ -1431,6 +1623,231 @@ function dayTimelineHtml(key) {
       }).join('')}
       ${TICKS.map(h=>`<div class="day-tl-tick" style="left:${pct(h)}"></div><div class="day-tl-label" style="left:calc(${pct(h)} + 2px)">${TLABELS[h]}</div>`).join('')}
     </div>
+  </div>${(() => {
+    // Conflict detection
+    const sorted = [...timed].sort((a,b) => a.startMin - b.startMin);
+    const clashes = [];
+    for (let i = 1; i < sorted.length; i++) if (sorted[i].startMin < sorted[i-1].endMin) clashes.push([sorted[i-1].summary, sorted[i].summary]);
+    return clashes.length ? `<div style="font-size:8px;color:rgba(232,136,74,0.9);margin-top:3px;padding:3px 6px;background:rgba(232,136,74,0.08);border-radius:5px">⚠ Overlap: ${clashes[0][0]} & ${clashes[0][1]}</div>` : '';
+  })()}`;
+}
+
+// ── Plan velocity sparkline ───────────────────────────────────
+function plansPerWeekData() {
+  const seasonStart = new Date(Y, 8, 1), seasonEnd = new Date(Y, 11, 1);
+  const ws = new Date(seasonStart);
+  ws.setDate(ws.getDate() - ws.getDay()); // roll back to Sunday
+  const weeks = [];
+  while (ws < seasonEnd) {
+    let count = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(ws); d.setDate(d.getDate() + i);
+      if (d.getMonth() < 8 || d.getMonth() > 10) continue;
+      count += (allEvents[dayKey(d.getFullYear(), d.getMonth(), d.getDate())] || []).length;
+    }
+    weeks.push({ start: new Date(ws), count });
+    ws.setDate(ws.getDate() + 7);
+  }
+  return weeks;
+}
+
+function velocitySparklineHtml() {
+  const weeks = plansPerWeekData();
+  if (!weeks.length) return '';
+  const max = Math.max(...weeks.map(w => w.count), 1);
+  const W = 220, H = 44, BAR = Math.max(Math.floor((W - weeks.length) / weeks.length), 2);
+  const today = new Date(todayMidnight);
+  const past = weeks.filter(w => w.start <= today);
+  let trend = '→', trendColor = 'var(--ink-3)';
+  if (past.length >= 6) {
+    const r = past.slice(-3).reduce((a, w) => a + w.count, 0);
+    const p = past.slice(-6, -3).reduce((a, w) => a + w.count, 0);
+    if (r > p * 1.2) { trend = '↑ picking up'; trendColor = 'var(--accent)'; }
+    else if (r < p * 0.8) { trend = '↓ slowing'; trendColor = 'rgba(232,136,74,0.8)'; }
+    else { trend = '→ steady'; }
+  }
+  const bars = weeks.map((w, i) => {
+    const isCur = today >= w.start && today < new Date(w.start.getTime() + 7 * 864e5);
+    const isPast = new Date(w.start.getTime() + 7 * 864e5) <= today;
+    const barH = w.count === 0 ? 2 : Math.round((w.count / max) * (H - 6)) + 2;
+    const x = i * (BAR + 1), y = H - barH;
+    const fill = isCur ? '#5EBF8A' : isPast ? '#5EBF8A66' : 'rgba(94,191,138,0.2)';
+    return `<rect x="${x}" y="${y}" width="${BAR}" height="${barH}" rx="1" fill="${fill}"/>`;
+  }).join('');
+  const moLabels = ['Sep', 'Oct', 'Nov'].map((mo, mi) => {
+    const idx = weeks.findIndex(w => w.start.getMonth() === 8 + mi);
+    return idx >= 0 ? `<text x="${idx * (BAR + 1)}" y="${H + 10}" font-size="7" fill="rgba(232,234,240,0.3)" font-family="system-ui">${mo}</text>` : '';
+  }).join('');
+  const total = weeks.reduce((a, w) => a + w.count, 0);
+  return `<div>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:5px">
+      <div class="section-label" style="margin-bottom:0">Plan velocity</div>
+      <div style="font-size:8.5px;color:${trendColor};font-weight:700">${trend}</div>
+    </div>
+    <svg width="100%" viewBox="0 0 ${W} ${H + 14}" style="display:block;overflow:visible">${bars}${moLabels}</svg>
+    <div style="font-size:8px;color:var(--ink-3);margin-top:1px">${total} plans · ${weeks.filter(w => w.count > 0).length} active weeks · bar = 1 week</div>
+  </div>`;
+}
+
+// ── Seasonal bucket list ──────────────────────────────────────
+const BUCKET_DEFAULTS = [
+  '🍎 Apple picking', '🎃 Pumpkin carving', '🌽 Corn maze', '🍂 Fall foliage hike',
+  '👻 Halloween party', '🕯 Haunted house', '🥧 Friendsgiving', '☕ Cider donuts',
+  '🎬 Cozy movie night', '🦃 Thanksgiving dinner',
+];
+
+function getBucketList() {
+  try {
+    const s = localStorage.getItem('fallBucketList2026');
+    return s ? JSON.parse(s) : BUCKET_DEFAULTS.map((text, i) => ({ id: `d${i}`, text, checked: false }));
+  } catch { return BUCKET_DEFAULTS.map((text, i) => ({ id: `d${i}`, text, checked: false })); }
+}
+
+function saveBucketList(items) {
+  try { localStorage.setItem('fallBucketList2026', JSON.stringify(items)); } catch {}
+}
+
+function bucketListHtml() {
+  const items = getBucketList();
+  const done = items.filter(x => x.checked).length;
+  const pct = items.length ? Math.round(done / items.length * 100) : 0;
+  const rows = items.map((item, i) => `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer">
+    <input type="checkbox" class="bucket-check" data-i="${i}" ${item.checked ? 'checked' : ''} style="accent-color:var(--accent);width:12px;height:12px;flex-shrink:0;cursor:pointer">
+    <span style="font-size:10.5px;color:${item.checked ? 'var(--ink-3)' : 'var(--ink)'};text-decoration:${item.checked ? 'line-through' : 'none'}">${item.text}</span>
+    <button class="bucket-del" data-i="${i}" style="margin-left:auto;font-size:11px;color:var(--ink-3);background:none;border:none;cursor:pointer;padding:0 2px;line-height:1;opacity:0.45">×</button>
+  </label>`).join('');
+  return `<div>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:5px">
+      <div class="section-label" style="margin-bottom:0">🍂 Fall bucket list</div>
+      <div style="font-size:8.5px;color:var(--ink-3)">${done}/${items.length} done</div>
+    </div>
+    <div style="height:4px;border-radius:2px;background:var(--border);margin-bottom:9px;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:2px"></div>
+    </div>
+    <div id="bucket-list">${rows}</div>
+    <div style="display:flex;gap:4px;margin-top:7px">
+      <input id="bucket-inp" class="add-input-sm" placeholder="Add item…" style="flex:1">
+      <button id="bucket-add" class="add-btn" style="flex-shrink:0">+</button>
+    </div>
+  </div>`;
+}
+
+// ── Golden combo (free + great wx + overdue friend) ───────────
+function goldenComboHtml() {
+  const debt = friendDebtMap();
+  const overdue = friendsList.filter(f => { const d = debt[f.id]; return d && d.daysSince !== null && d.daysSince > 7; }).sort((a, b) => (debt[b.id]?.daysSince || 0) - (debt[a.id]?.daysSince || 0));
+  if (!overdue.length) return '';
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const combos = [];
+  Object.entries(weatherByDate).forEach(([date, wx]) => {
+    const [Y2, m2, d2] = date.split('-').map(Number);
+    if (m2 - 1 < 8 || m2 - 1 > 10) return;
+    const dow = new Date(Y2, m2 - 1, d2).getDay();
+    const isWknd = dow === 0 || dow === 6;
+    if (!isWknd) return;
+    const key = date;
+    if (isCoveredDay(key, gcalByDate[key] || [])) return;
+    if ((allEvents[key] || []).length > 0) return;
+    let temps = [], maxPrecip = 0;
+    for (let h = 13; h < 24; h++) { const he = wx.hourly?.[h]; if (he) { temps.push(he.temp); maxPrecip = Math.max(maxPrecip, he.precip || 0); } }
+    const winHi = temps.length ? Math.max(...temps) : null;
+    if (maxPrecip > 30 || winHi === null || winHi < 52) return;
+    combos.push({ key, date, wx, winHi, maxPrecip });
+  });
+  if (!combos.length) return '';
+  const best = combos[0], friend = overdue[0];
+  const [, bm, bd] = best.date.split('-').map(Number);
+  const dow = new Date(Y, bm - 1, bd).getDay();
+  return `<div style="border:1px solid rgba(94,191,138,0.45);border-radius:11px;padding:11px 13px;background:rgba(94,191,138,0.07)">
+    <div style="font-size:7.5px;font-weight:700;color:var(--accent);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">✦ Golden window</div>
+    <div style="font-size:12.5px;font-weight:700;color:var(--ink);margin-bottom:3px">${best.wx.emoji} ${DAYS[dow]} ${MON[bm-1]} ${bd} — ${best.winHi}° · ${best.maxPrecip}% rain</div>
+    <div style="font-size:9.5px;color:var(--ink-3);margin-bottom:9px">You're free · <span style="color:${friend.color}">${friend.name}</span> overdue ${debt[friend.id].daysSince}d</div>
+    <div class="golden-open" data-key="${best.key}" style="font-size:9.5px;font-weight:700;padding:4px 14px;border-radius:20px;border:1px solid rgba(94,191,138,0.4);background:rgba(94,191,138,0.12);color:var(--accent);cursor:pointer;display:inline-block">Plan it →</div>
+  </div>`;
+}
+
+// ── Auto-recurring patterns ───────────────────────────────────
+function recurringPatternsHtml() {
+  const patterns = {};
+  Object.entries(gcalByDate).forEach(([key, evts]) => {
+    const [, ms, ds] = key.split('-');
+    const dow = new Date(Y, parseInt(ms) - 1, parseInt(ds)).getDay();
+    evts.forEach(e => {
+      if (!e.summary || e.allDay) return;
+      const pk = `${e.summary.slice(0, 30)}::${dow}`;
+      if (!patterns[pk]) patterns[pk] = { summary: e.summary, dow, dates: [] };
+      patterns[pk].dates.push(key);
+    });
+  });
+  const recurring = Object.values(patterns).filter(p => p.dates.length >= 2).sort((a, b) => b.dates.length - a.dates.length).slice(0, 6);
+  if (!recurring.length) return '';
+  return `<div>
+    <div class="section-label" style="margin-bottom:7px">↻ Recurring patterns</div>
+    <div style="display:flex;flex-direction:column;gap:4px">
+      ${recurring.map(p => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:rgba(255,255,255,0.025);border:1px solid var(--border);border-radius:8px">
+        <div>
+          <div style="font-size:10.5px;font-weight:600;color:var(--ink)">${p.summary}</div>
+          <div style="font-size:8.5px;color:var(--ink-3)">${DAYS[p.dow]}s · ${p.dates.length}×</div>
+        </div>
+        <span style="font-size:9px;color:var(--accent);font-weight:700">${p.dates.length}×</span>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+// ── Free window finder ────────────────────────────────────────
+function freeWindowsHtml() {
+  const MON_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const windows = [];
+  for (let i = 0; i <= 28; i++) {
+    const d = new Date(todayMidnight);
+    d.setDate(d.getDate() + i);
+    const key = dayKey(d.getFullYear(), d.getMonth(), d.getDate());
+    // skip if outside our fall window
+    if (d.getMonth() < 8 || d.getMonth() > 10) continue;
+    const gcalEvts = gcalByDate[key] || [];
+    const covered = isCoveredDay(key, gcalEvts);
+    if (covered) continue;
+    const wx = weatherByDate[key];
+    const dow = d.getDay();
+    const isWknd = dow === 0 || dow === 6;
+    let winTemps = [], winMaxPrecip = 0;
+    if (wx?.hourly) {
+      const winS = isWknd ? 13 : 16, winE = isWknd ? 24 : 22;
+      for (let h = winS; h < winE; h++) {
+        const he = wx.hourly[h];
+        if (he) { winTemps.push(he.temp); winMaxPrecip = Math.max(winMaxPrecip, he.precip || 0); }
+      }
+    }
+    const winHi = winTemps.length ? Math.max(...winTemps) : null;
+    const wxScore = wx ? (100 - winMaxPrecip) + (winHi ? Math.min(winHi, 75) : 0) : 0;
+    windows.push({ key, d, wx, isWknd, winHi, winMaxPrecip, wxScore });
+  }
+  windows.sort((a, b) => {
+    if (a.isWknd !== b.isWknd) return a.isWknd ? -1 : 1;
+    return b.wxScore - a.wxScore;
+  });
+  const shown = windows.slice(0, 12);
+  if (!shown.length) return `<div><div class="section-label">🗓 Free windows</div><div style="font-size:9.5px;color:var(--ink-3);font-style:italic">No open days in next 28 days.</div></div>`;
+  const cards = shown.map(({ key, d, wx, isWknd, winHi, winMaxPrecip }) => {
+    const isGreat = winMaxPrecip <= 20 && winHi !== null && winHi >= 52 && winHi <= 82;
+    const isRainy = winMaxPrecip > 50;
+    const border = isGreat ? 'rgba(94,191,138,0.4)' : isRainy ? 'rgba(120,170,220,0.3)' : 'var(--border)';
+    const bg = isGreat ? 'rgba(94,191,138,0.07)' : isRainy ? 'rgba(120,170,220,0.05)' : 'rgba(255,255,255,0.02)';
+    return `<div class="free-window-card" data-key="${key}" style="flex-shrink:0;width:64px;border:1px solid ${border};border-radius:10px;padding:8px 5px;background:${bg};text-align:center;cursor:pointer;transition:opacity .15s" onmouseover="this.style.opacity='.8'" onmouseout="this.style.opacity='1'">
+      <div style="font-size:7.5px;font-weight:700;color:${isWknd ? 'var(--accent)' : 'var(--ink-3)'};text-transform:uppercase;letter-spacing:.05em">${DAYS[d.getDay()].slice(0,3)}</div>
+      <div style="font-size:7.5px;color:var(--ink-3);margin-bottom:4px">${MON_ABBR[d.getMonth()]} ${d.getDate()}</div>
+      ${wx ? `<div style="font-size:18px;line-height:1.2">${wx.emoji}</div><div style="font-size:9px;font-weight:700;color:var(--ink);margin-top:2px">${wx.hi}°/${wx.lo}°</div>` : '<div style="font-size:18px;line-height:1.3">📅</div>'}
+      ${winMaxPrecip > 20 ? `<div style="font-size:7px;color:#78AADC;margin-top:2px">💧${winMaxPrecip}%</div>`
+        : isGreat ? `<div style="font-size:7px;color:var(--accent);font-weight:700;margin-top:2px">✓ clear</div>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="free-windows-section">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:5px">
+      <div class="section-label" style="margin-bottom:0">🗓 Free windows</div>
+      <div style="font-size:8.5px;color:var(--ink-3)">${windows.length} open · click to plan</div>
+    </div>
+    <div style="display:flex;gap:5px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin">${cards}</div>
   </div>`;
 }
 
@@ -1751,6 +2168,84 @@ function timesOfDayHtml() {
 document.getElementById('nav-prev').addEventListener('click', () => { if (viewStart > 0) { viewStart--; renderCalendar(); } });
 document.getElementById('nav-next').addEventListener('click', () => { if (viewStart < 1) { viewStart++; renderCalendar(); } });
 document.addEventListener('keydown', e => { if (e.shiftKey && e.altKey && e.key === 'T') runTests(); });
+
+// ── Keyboard navigation ───────────────────────────────────────
+function adjDay(delta) {
+  if (!selKey) {
+    const d = new Date(todayMidnight); selectDay(dayKey(d.getFullYear(), d.getMonth(), d.getDate())); return;
+  }
+  const [, ms, ds] = selKey.split('-').map(Number);
+  const cur = new Date(Y, ms - 1, ds);
+  cur.setDate(cur.getDate() + delta);
+  if (cur.getMonth() < 8 || cur.getMonth() > 10) return;
+  selectDay(dayKey(cur.getFullYear(), cur.getMonth(), cur.getDate()));
+}
+
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement?.tagName;
+  if (['INPUT','TEXTAREA','SELECT'].includes(tag)) return;
+  if (document.getElementById('search-modal')?.style.display !== 'none') return;
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openSearch(); return; }
+  if (e.key === 'Escape') { selKey = null; closePanel(); if (activeTab === 'calendar') renderCalendar(); return; }
+  if (e.key === 'j' || e.key === 'ArrowRight') { e.preventDefault(); adjDay(1); return; }
+  if (e.key === 'k' || e.key === 'ArrowLeft') { e.preventDefault(); adjDay(-1); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); adjDay(7); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); adjDay(-7); return; }
+});
+
+// ── Search (Cmd+K) ────────────────────────────────────────────
+let searchIdx = -1;
+function openSearch() {
+  const modal = document.getElementById('search-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const inp = document.getElementById('search-inp');
+  if (inp) { inp.value = ''; inp.focus(); renderSearchResults(''); }
+}
+function closeSearch() {
+  const modal = document.getElementById('search-modal');
+  if (modal) modal.style.display = 'none';
+  searchIdx = -1;
+}
+function renderSearchResults(q) {
+  const container = document.getElementById('search-results');
+  if (!container) return;
+  const results = [];
+  if (q.trim()) {
+    const lq = q.toLowerCase();
+    Object.entries(allEvents).forEach(([key, plans]) => {
+      plans.forEach(p => { if (p.name?.toLowerCase().includes(lq)) results.push({ key, text: p.name, sub: key.slice(5).replace('-','/'), icon: '📌' }); });
+    });
+    Object.entries(gcalByDate).forEach(([key, evts]) => {
+      evts.forEach(e => { if (e.summary?.toLowerCase().includes(lq)) results.push({ key, text: e.summary, sub: key.slice(5).replace('-','/') + ' · GCal', icon: '📅' }); });
+    });
+    Object.entries(notesData).forEach(([key, note]) => {
+      if (note?.toLowerCase().includes(lq)) results.push({ key, text: note.slice(0,60), sub: key.slice(5).replace('-','/') + ' · note', icon: '📝' });
+    });
+  }
+  const shown = results.slice(0, 8);
+  searchIdx = -1;
+  if (!shown.length) {
+    container.innerHTML = `<div style="padding:16px 14px;text-align:center;font-size:10px;color:var(--ink-3)">${q ? 'No results' : 'Start typing to search…'}</div>`;
+    return;
+  }
+  container.innerHTML = shown.map((r, i) => `<div class="search-result" data-key="${r.key}" data-i="${i}">
+    <span class="search-result-icon">${r.icon}</span>
+    <div><div class="search-result-text">${r.text}</div><div class="search-result-sub">${r.sub}</div></div>
+  </div>`).join('');
+  container.querySelectorAll('.search-result').forEach(row => {
+    row.addEventListener('click', () => { closeSearch(); selectDay(row.dataset.key); });
+  });
+}
+document.getElementById('search-inp')?.addEventListener('input', e => renderSearchResults(e.target.value));
+document.getElementById('search-inp')?.addEventListener('keydown', e => {
+  const rows = document.querySelectorAll('.search-result');
+  if (e.key === 'ArrowDown') { e.preventDefault(); searchIdx = Math.min(searchIdx + 1, rows.length - 1); rows.forEach((r, i) => r.classList.toggle('active', i === searchIdx)); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); searchIdx = Math.max(searchIdx - 1, 0); rows.forEach((r, i) => r.classList.toggle('active', i === searchIdx)); }
+  else if (e.key === 'Enter') { const active = document.querySelector('.search-result.active') || rows[0]; if (active) { closeSearch(); selectDay(active.dataset.key); } }
+  else if (e.key === 'Escape') closeSearch();
+});
+document.getElementById('search-modal')?.addEventListener('click', e => { if (e.target === e.currentTarget) closeSearch(); });
 
 document.getElementById('tab-row').querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {

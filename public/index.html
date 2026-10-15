@@ -229,6 +229,14 @@
   .export-btn { font-size: 9.5px; font-weight: 600; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--border); background: rgba(255,255,255,0.05); color: var(--ink-3); cursor: pointer; }
   .export-btn:hover { background: rgba(255,255,255,0.10); color: var(--ink-2); }
   .gap-alert { font-size: 10px; font-weight: 600; color: var(--orange); background: rgba(232,136,74,0.12); border: 1px solid rgba(232,136,74,0.3); border-radius: 20px; padding: 2px 10px; }
+  .rain-alert { position: absolute; top: 2px; right: 2px; font-size: 11px; line-height: 1; pointer-events: none; }
+  .note-dot { position: absolute; top: 3px; left: 3px; width: 5px; height: 5px; border-radius: 50%; background: rgba(200,168,75,0.7); pointer-events: none; }
+  .stat-countdown { opacity: 0.65; }
+  .search-result { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background .1s; }
+  .search-result:hover, .search-result.active { background: rgba(94,191,138,0.08); }
+  .search-result-icon { font-size: 13px; flex-shrink: 0; }
+  .search-result-text { font-size: 11px; font-weight: 600; color: var(--ink); }
+  .search-result-sub { font-size: 9px; color: var(--ink-3); margin-top: 1px; }
   .spacer { position: relative; z-index: 1; height: 70vh; pointer-events: none; }
 
   /* ── Week View ───────────────────────────────────────── */
@@ -275,6 +283,7 @@
         <div class="stat"><div class="stat-n" id="stat-plans">0</div><div class="stat-l">Total Plans</div></div>
         <div class="stat"><div class="stat-n" id="stat-remain">0</div><div class="stat-l">Days Left</div></div>
         <div class="stat"><div class="stat-n" id="stat-streak">0</div><div class="stat-l">Streak</div></div>
+        <div class="stat stat-countdown"><div class="stat-n" id="stat-countdown">–</div><div class="stat-l">🍂 til Dec</div></div>
       </div>
     </div>
     <div class="tab-row" id="tab-row">
@@ -319,6 +328,20 @@
 </div>
 <canvas id="leaves-canvas" style="position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none"></canvas>
 <div class="spacer"></div>
+
+<!-- Search modal -->
+<div id="search-modal" style="display:none;position:fixed;inset:0;z-index:200;align-items:flex-start;justify-content:center;padding-top:80px;background:rgba(8,14,28,0.7);backdrop-filter:blur(4px)">
+  <div style="width:min(420px,90vw);background:#111827;border:1px solid rgba(255,255,255,0.12);border-radius:14px;overflow:hidden;box-shadow:0 24px 48px rgba(0,0,0,0.6)">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.08)">
+      <span style="font-size:14px;opacity:0.4">🔍</span>
+      <input id="search-inp" placeholder="Search plans and events…" autocomplete="off" style="flex:1;background:none;border:none;color:var(--ink);font-size:13px;outline:none">
+      <kbd style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(255,255,255,0.08);color:var(--ink-3)">Esc</kbd>
+    </div>
+    <div id="search-results" style="max-height:300px;overflow-y:auto"></div>
+    <div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.06);font-size:8.5px;color:var(--ink-3)">⌘K to open · ↑↓ navigate · Enter to jump</div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
