@@ -20,6 +20,7 @@ let allEvents = {}, goalsData = {}, friendsList = [], tagsData = {}, notesData =
 let selKey = null, selCat = 'other', selFriendId = null, isFriend = true, viewStart = 0;
 let activeTab = 'calendar', editingPlanIdx = null;
 let gcalConnected = false, gcalEmail = null, gcalByDate = {};
+let gcalToken = null, tokenClient = null;
 let weatherByDate = {};
 let gcalRefreshInterval = null;
 let weekStart = null;
@@ -113,50 +114,52 @@ function initParallax() {
   }, { passive: true });
 }
 
-// ── API ───────────────────────────────────────────────────────
-async function api(path, method = 'GET', body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
-  return res.json();
+// ── Config ────────────────────────────────────────────────────
+const GCAL_CLIENT_ID = window.GCAL_CLIENT_ID || '';
+
+// ── localStorage helpers ──────────────────────────────────────
+const LS = {
+  get: (k, d = null) => { try { const v = localStorage.getItem(k); return v !== null ? JSON.parse(v) : d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  del: (k) => { try { localStorage.removeItem(k); } catch {} },
+};
+
+// ── Weather helpers ───────────────────────────────────────────
+function weatherEmoji(code) {
+  if (code === 0) return '☀️';
+  if (code <= 2) return '🌤️';
+  if (code === 3) return '☁️';
+  if (code <= 48) return '🌫️';
+  if (code <= 55) return '🌦️';
+  if (code <= 67) return '🌧️';
+  if (code <= 77) return '🌨️';
+  if (code <= 82) return '🌦️';
+  if (code <= 86) return '❄️';
+  return '⛈️';
+}
+function weatherDesc(code) {
+  if (code === 0) return 'Clear';
+  if (code <= 2) return 'Partly cloudy';
+  if (code === 3) return 'Overcast';
+  if (code <= 48) return 'Foggy';
+  if (code <= 55) return 'Drizzle';
+  if (code <= 67) return 'Rain';
+  if (code <= 77) return 'Snow';
+  if (code <= 82) return 'Showers';
+  if (code <= 86) return 'Snow showers';
+  return 'Thunderstorm';
 }
 
 async function loadAll() {
-  const [evts, frnds, goals, tags, notes] = await Promise.all([
-    api('/api/events'),
-    api('/api/friends'),
-    api('/api/goals'),
-    fetch('/api/tags').then(r => r.json()).catch(() => ({})),
-    fetch('/api/notes').then(r => r.json()).catch(() => ({ notes: {} })),
-  ]);
-  allEvents = evts || {};
+  allEvents = LS.get('fc_events', {});
   Object.keys(allEvents).forEach(k => { allEvents[k] = sortPlans(allEvents[k]); });
-  friendsList = frnds || [];
-  goalsData = goals || {};
-  tagsData = tags || {};
-  notesData = notes?.notes || {};
+  friendsList = LS.get('fc_friends', []);
+  goalsData = LS.get('fc_goals', {});
+  tagsData = LS.get('fc_tags', {});
+  notesData = LS.get('fc_notes', {});
   renderAll();
-  // Weather (non-blocking)
-  fetch('/api/weather').then(r => r.json()).then(w => {
-    if (w.byDate) { weatherByDate = w.byDate; renderAll(); }
-  }).catch(() => {});
-  // GCal status + live events (non-blocking)
-  fetch('/api/gcal/status').then(r => r.json()).then(s => {
-    gcalConnected = s.connected || false;
-    gcalEmail = s.email || null;
-    updateGCalBtn();
-    if (gcalConnected && new URLSearchParams(location.search).get('gcal') === 'connected') {
-      history.replaceState(null, '', '/');
-      showGCalSync();
-    }
-    if (gcalConnected) {
-      refreshGCalEvents();
-      if (!gcalRefreshInterval) {
-        gcalRefreshInterval = setInterval(() => refreshGCalEvents(true), 5 * 60 * 1000);
-      }
-    }
-  }).catch(() => {});
+  fetchWeather().catch(() => {});
+  initGcalAuth();
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -286,7 +289,7 @@ function catBreakdown() {
 async function saveTag(gcalId, dateKey, friends, cat) {
   const tagKey = `${gcalId}::${dateKey}`;
   tagsData[tagKey] = { friends, cat };
-  try { await api(`/api/tags/${encodeURIComponent(gcalId)}/${dateKey}`, 'PUT', { friends, cat }); } catch {}
+  LS.set('fc_tags', tagsData);
 }
 
 // ── Persist ───────────────────────────────────────────────────
@@ -311,7 +314,9 @@ async function persistDay(key, plans) {
   const sorted = sortPlans(plans);
   const oldPlans = allEvents[key] || [];
   allEvents[key] = sorted;
-  await api(`/api/events/${key}`, 'PUT', { plans: sorted });
+  const stored = LS.get('fc_events', {});
+  if (sorted.length === 0) delete stored[key]; else stored[key] = sorted;
+  LS.set('fc_events', stored);
   renderAll();
   if (sorted.length > 0) {
     const tiles = document.querySelectorAll('.tile.success');
@@ -324,42 +329,64 @@ async function persistDay(key, plans) {
   if (gcalConnected) syncDayToGCal(key, oldPlans, sorted);
 }
 
+function parseEventTimeForGCal(date, timeStr) {
+  if (!timeStr || !timeStr.trim()) return { start: { date }, end: { date } };
+  const t = timeStr.trim().toLowerCase();
+  let h = 0, m = 0;
+  const m12 = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+  const m24 = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (m12) {
+    h = parseInt(m12[1]); m = parseInt(m12[2] || '0');
+    if (m12[3] === 'pm' && h !== 12) h += 12;
+    if (m12[3] === 'am' && h === 12) h = 0;
+  } else if (m24) {
+    h = parseInt(m24[1]); m = parseInt(m24[2]);
+  } else return { start: { date }, end: { date } };
+  const pad = n => String(n).padStart(2, '0');
+  return {
+    start: { dateTime: `${date}T${pad(h)}:${pad(m)}:00`, timeZone: 'America/New_York' },
+    end: { dateTime: `${date}T${pad(h < 23 ? h + 1 : 23)}:${pad(m)}:00`, timeZone: 'America/New_York' },
+  };
+}
+
 async function syncDayToGCal(key, oldPlans, newPlans) {
-  // Delete removed app-created events
+  if (!gcalToken) return;
+  const gcalBase = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+  const headers = { Authorization: `Bearer ${gcalToken}`, 'Content-Type': 'application/json' };
+
   for (const op of oldPlans) {
     if (!op.gcalCreated || !op.gcalId) continue;
     if (!newPlans.some(np => np.gcalId === op.gcalId)) {
-      try { await api(`/api/gcal/delete/${encodeURIComponent(op.gcalId)}`, 'DELETE'); } catch {}
+      try { await fetch(`${gcalBase}/${encodeURIComponent(op.gcalId)}`, { method: 'DELETE', headers }); } catch {}
     }
   }
 
-  // Create new plans / update changed ones
   const current = [...(allEvents[key] || [])];
   let changed = false;
   for (let i = 0; i < current.length; i++) {
     const p = current[i];
     if (!p.gcalId) {
       try {
-        const res = await api('/api/gcal/create', 'POST', { date: key, title: p.name, time: p.time });
-        if (res.gcalId) { current[i] = { ...p, gcalId: res.gcalId, gcalCreated: true }; changed = true; }
+        const res = await fetch(gcalBase, { method: 'POST', headers, body: JSON.stringify({ summary: p.name, ...parseEventTimeForGCal(key, p.time) }) });
+        if (res.ok) { const ev = await res.json(); if (ev.id) { current[i] = { ...p, gcalId: ev.id, gcalCreated: true }; changed = true; } }
       } catch {}
     } else if (p.gcalCreated) {
       const oldP = oldPlans.find(op => op.gcalId === p.gcalId);
       if (oldP && (oldP.name !== p.name || oldP.time !== p.time)) {
-        try { await api(`/api/gcal/update/${encodeURIComponent(p.gcalId)}`, 'PATCH', { title: p.name, date: key, time: p.time }); } catch {}
+        try { await fetch(`${gcalBase}/${encodeURIComponent(p.gcalId)}`, { method: 'PATCH', headers, body: JSON.stringify({ summary: p.name, ...parseEventTimeForGCal(key, p.time) }) }); } catch {}
       }
     }
   }
 
   if (changed) {
     allEvents[key] = sortPlans(current);
-    await api(`/api/events/${key}`, 'PUT', { plans: allEvents[key] });
+    const stored = LS.get('fc_events', {}); stored[key] = allEvents[key]; LS.set('fc_events', stored);
   }
 }
 
 async function persistGoal(m, target) {
   goalsData[goalKey(m)] = target;
-  await api(`/api/goals/${goalKey(m)}`, 'PUT', { target });
+  LS.set('fc_goals', goalsData);
   renderAll();
 }
 
@@ -853,11 +880,18 @@ function attachPanelEvents(key, plans, past) {
     const title = titleEl?.value.trim(); if (!title) return;
     gcalAddBtn.disabled = true; gcalAddBtn.textContent = 'Adding…';
     try {
-      await api('/api/gcal/create', 'POST', { date: key, title, time: timeEl?.value.trim() || '' });
-      if (titleEl) titleEl.value = '';
-      if (timeEl) timeEl.value = '';
-      await refreshGCalEvents(true);
-      if (selKey) renderPanel(selKey);
+      const timing = parseEventTimeForGCal(key, timeEl?.value.trim() || '');
+      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${gcalToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: title, ...timing }),
+      });
+      if (res.ok) {
+        if (titleEl) titleEl.value = '';
+        if (timeEl) timeEl.value = '';
+        await refreshGCalEvents(true);
+        if (selKey) renderPanel(selKey);
+      }
     } catch {}
     gcalAddBtn.disabled = false; gcalAddBtn.textContent = '+ Add to GCal';
   });
@@ -868,8 +902,8 @@ function attachPanelEvents(key, plans, past) {
     noteEl.addEventListener('blur', async () => {
       const note = noteEl.value;
       notesData[key] = note;
-      await fetch(`/api/notes/${key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
-      renderCalendar(); // refresh note dot
+      LS.set('fc_notes', notesData);
+      renderCalendar();
     });
   }
 }
@@ -927,14 +961,159 @@ async function generateRecap(panel) {
   if (recapBtn) { recapBtn.disabled = false; recapBtn.textContent = '↻ Regenerate Recap'; }
 }
 
+// ── Weather ───────────────────────────────────────────────────
+async function fetchWeather() {
+  const today = new Date().toISOString().slice(0, 10);
+  const end = new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10);
+  const base = `https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.0060&timezone=America%2FNew_York&temperature_unit=fahrenheit&start_date=${today}&end_date=${end}`;
+  const [dailyRes, hourlyRes] = await Promise.all([
+    fetch(base + '&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max'),
+    fetch(base + '&hourly=temperature_2m,weathercode,precipitation_probability'),
+  ]);
+  if (!dailyRes.ok) return;
+  const daily = await dailyRes.json();
+  const byDate = {};
+  (daily.daily?.time || []).forEach((date, i) => {
+    byDate[date] = {
+      hi: Math.round(daily.daily.temperature_2m_max[i]),
+      lo: Math.round(daily.daily.temperature_2m_min[i]),
+      code: daily.daily.weathercode[i],
+      emoji: weatherEmoji(daily.daily.weathercode[i]),
+      desc: weatherDesc(daily.daily.weathercode[i]),
+      precip: daily.daily.precipitation_probability_max[i] ?? 0,
+      hourly: {},
+    };
+  });
+  if (hourlyRes.ok) {
+    const hourly = await hourlyRes.json();
+    (hourly.hourly?.time || []).forEach((timeStr, i) => {
+      const date = timeStr.slice(0, 10);
+      const hour = parseInt(timeStr.slice(11, 13));
+      if (byDate[date]) {
+        byDate[date].hourly[hour] = {
+          temp: Math.round(hourly.hourly.temperature_2m[i]),
+          code: hourly.hourly.weathercode[i],
+          emoji: weatherEmoji(hourly.hourly.weathercode[i]),
+          precip: hourly.hourly.precipitation_probability[i] ?? 0,
+        };
+      }
+    });
+  }
+  weatherByDate = byDate;
+  renderAll();
+}
+
 // ── Google Calendar ───────────────────────────────────────────
+function initGcalAuth() {
+  if (!GCAL_CLIENT_ID) { updateGCalBtn(); return; }
+  const stored = LS.get('fc_gcal_token', null);
+  if (stored && stored.expiry > Date.now() + 60000) {
+    gcalToken = stored.token;
+    gcalEmail = stored.email || null;
+    gcalConnected = true;
+    updateGCalBtn();
+    refreshGCalEvents();
+    if (!gcalRefreshInterval) gcalRefreshInterval = setInterval(() => refreshGCalEvents(true), 5 * 60 * 1000);
+  } else {
+    updateGCalBtn();
+  }
+  if (typeof google !== 'undefined') {
+    initTokenClient();
+  } else {
+    window.onGoogleLibraryLoad = initTokenClient;
+  }
+}
+
+function initTokenClient() {
+  if (typeof google === 'undefined' || !GCAL_CLIENT_ID) return;
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GCAL_CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/calendar',
+    callback: async (resp) => {
+      if (resp.error || !resp.access_token) {
+        gcalConnected = false; gcalToken = null;
+        LS.del('fc_gcal_token');
+        updateGCalBtn();
+        return;
+      }
+      gcalToken = resp.access_token;
+      gcalConnected = true;
+      const expiry = Date.now() + (resp.expires_in - 60) * 1000;
+      LS.set('fc_gcal_token', { token: gcalToken, expiry, email: gcalEmail });
+      updateGCalBtn();
+      await refreshGCalEvents(false);
+      if (!gcalRefreshInterval) gcalRefreshInterval = setInterval(() => refreshGCalEvents(true), 5 * 60 * 1000);
+    },
+  });
+  // Silent re-auth if we have a stored (possibly expired) token
+  if (gcalConnected || LS.get('fc_gcal_token')) {
+    tokenClient.requestAccessToken({ prompt: '' });
+  }
+}
+
+async function fetchGCalEvents() {
+  if (!gcalToken) return null;
+  const url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?' + new URLSearchParams({
+    singleEvents: 'true', orderBy: 'startTime',
+    timeMin: '2026-09-01T00:00:00-04:00',
+    timeMax: '2026-11-30T23:59:59-05:00',
+    maxResults: '500',
+  });
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${gcalToken}` } });
+  if (res.status === 401) {
+    gcalToken = null; gcalConnected = false;
+    LS.del('fc_gcal_token');
+    updateGCalBtn();
+    if (tokenClient) tokenClient.requestAccessToken({ prompt: '' });
+    return null;
+  }
+  if (!res.ok) return null;
+  const data = await res.json();
+  function minsNYC(dtStr) {
+    const s = new Date(dtStr).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+    const [h, m] = s.split(':').map(Number);
+    return (isNaN(h) ? 0 : h) * 60 + (isNaN(m) ? 0 : m);
+  }
+  const byDate = {};
+  for (const ev of data.items ?? []) {
+    if (!ev.start || ev.status === 'cancelled') continue;
+    const allDay = !!ev.start.date;
+    const rawStart = ev.start.date ?? ev.start.dateTime ?? '';
+    const date = rawStart.slice(0, 10);
+    if (!date) continue;
+    const entry = {
+      id: ev.id ?? '',
+      summary: ev.summary ?? '(No title)',
+      start: ev.start.dateTime ? new Date(ev.start.dateTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+      end: ev.end?.dateTime ? new Date(ev.end.dateTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+      allDay,
+      startMin: ev.start.dateTime ? minsNYC(ev.start.dateTime) : null,
+      endMin: ev.end?.dateTime ? minsNYC(ev.end.dateTime) : null,
+      description: ev.description || null,
+      location: ev.location || null,
+      attendees: (ev.attendees ?? []).map(a => a.displayName || a.email || '').filter(Boolean),
+    };
+    if (allDay && ev.end?.date && ev.end.date > rawStart) {
+      const cur = new Date(rawStart + 'T12:00:00Z');
+      const endD = new Date(ev.end.date + 'T12:00:00Z');
+      while (cur < endD) {
+        const d = cur.toISOString().slice(0, 10);
+        (byDate[d] = byDate[d] ?? []).push({ ...entry, multiDay: true });
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+    } else {
+      (byDate[date] = byDate[date] ?? []).push(entry);
+    }
+  }
+  return { byDate };
+}
+
 async function refreshGCalEvents(silent = true) {
   const btn = document.getElementById('gcal-btn');
   if (!silent && btn) { btn.textContent = '⟳ Syncing…'; btn.disabled = true; }
   try {
-    const res = await fetch(silent ? '/api/gcal/events' : '/api/gcal/events?refresh=true');
-    const data = await res.json();
-    if (data.byDate) {
+    const data = await fetchGCalEvents();
+    if (data?.byDate) {
       gcalByDate = data.byDate;
       renderAll();
       if (selKey) renderPanel(selKey);
@@ -949,15 +1128,16 @@ function updateGCalBtn() {
   btn.disabled = false;
   if (gcalConnected) {
     btn.textContent = `⟳ GCal${gcalEmail ? ': ' + gcalEmail.split('@')[0] : ''}`;
-    btn.title = 'Click to refresh · Long-press to import';
-    btn.onclick = async () => {
-      await refreshGCalEvents(false);
-    };
+    btn.title = 'Click to refresh · Double-click to import';
+    btn.onclick = async () => { await refreshGCalEvents(false); };
     btn.ondblclick = (e) => { e.preventDefault(); showGCalSync(); };
   } else {
     btn.textContent = '+ GCal';
     btn.title = 'Connect Google Calendar';
-    btn.onclick = () => { window.location.href = '/auth/login'; };
+    btn.onclick = () => {
+      if (!tokenClient) { alert('Google Sign-In not ready. Refresh the page.'); return; }
+      tokenClient.requestAccessToken({ prompt: 'consent' });
+    };
   }
 }
 
@@ -985,10 +1165,9 @@ async function showGCalSync() {
 
   let gcalData = {};
   try {
-    const res = await fetch('/api/gcal/events');
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    if (!gcalToken) throw new Error('Not connected to Google Calendar');
+    const data = await fetchGCalEvents();
+    if (!data) throw new Error('Failed to fetch events');
     gcalData = data.byDate || {};
   } catch (e) {
     body.innerHTML = `<div style="color:#E87878">Error: ${e.message}</div>`;
@@ -1088,9 +1267,11 @@ async function showGCalSync() {
         if (time) plan.time = time;
         existing.push(plan);
         allEvents[date] = existing;
-        await api(`/api/events/${date}`, 'PUT', { plans: existing });
       }
     }
+    const stored = LS.get('fc_events', {});
+    Object.keys(allEvents).forEach(k => { stored[k] = allEvents[k]; });
+    LS.set('fc_events', stored);
     renderAll();
     overlay.remove();
   });
@@ -1155,7 +1336,7 @@ function renderFriendsBoard() {
       const fi = parseInt(btn.dataset.fi);
       const f = friendsList[fi];
       friendsList.splice(fi, 1);
-      await fetch(`/api/friends/${f.id}`, { method: 'DELETE' });
+      LS.set('fc_friends', friendsList);
       renderFriendsBoard();
     });
   });
@@ -1166,7 +1347,7 @@ function renderFriendsBoard() {
     const name = inp?.value.trim(); if (!name) return;
     const id = `f${Date.now()}`, color = FRIEND_COLORS[friendsList.length % FRIEND_COLORS.length];
     friendsList.push({ id, name, color });
-    await fetch('/api/friends', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name, color }) });
+    LS.set('fc_friends', friendsList);
     renderFriendsBoard();
   });
 }
@@ -1559,7 +1740,7 @@ function renderInsights() {
         const planSummary = Object.entries(allEvents).map(([k,ps]) => `${k}: ${ps.map(p=>p.name).join(', ')}`).join('; ');
         const topCats = Object.entries(catBreakdown()).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k}(${v})`).join(', ');
         const friends = friendsList.map(f=>f.name).join(', ');
-        const data = await api('/api/ai/insights', 'POST', { plans: planSummary, friends, topCats });
+        const data = await fetch('/api/ai/insights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plans: planSummary, friends, topCats }) }).then(r => r.json());
         if (data.recs?.length) {
           recsList.innerHTML = data.recs.map(recHtml).join('');
           recsList.querySelectorAll('.insight-plan-btn').forEach(btn => {
