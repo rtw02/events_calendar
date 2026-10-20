@@ -487,12 +487,22 @@ async function api(req: Request, url: URL): Promise<Response> {
 
 // ── Static ────────────────────────────────────────────────────
 async function serveStatic(path: string): Promise<Response> {
-  // Background photo — serve from Desktop without copying
   if (path === "/bg.jpg") {
     const bgPath = process.env.BG_IMAGE ?? `${process.env.HOME}/Desktop/102_1350-2.jpg`;
     const f = Bun.file(bgPath);
     if (await f.exists()) return new Response(f, { headers: { "Content-Type": "image/jpeg" } });
     return new Response("Not found", { status: 404 });
+  }
+  // Inject GOOGLE_CLIENT_ID into index.html for browser-side GIS auth
+  if (path === "/" || path === "/index.html") {
+    const file = Bun.file("./public/index.html");
+    if (await file.exists()) {
+      let html = await file.text();
+      if (process.env.GOOGLE_CLIENT_ID) {
+        html = html.replace("window.GCAL_CLIENT_ID = '';", `window.GCAL_CLIENT_ID = '${process.env.GOOGLE_CLIENT_ID}';`);
+      }
+      return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
   }
   const filePath = `./public${path === "/" ? "/index.html" : path}`;
   const file = Bun.file(filePath);
