@@ -25,6 +25,7 @@ let weatherByDate = {};
 let gcalRefreshInterval = null;
 let weekStart = null;
 let lastViewStart = -1;
+let lastCountdownVal = -1;
 let calendarRenderedOnce = false;
 const suggCache = {};
 const now = new Date();
@@ -313,11 +314,13 @@ function sortPlans(plans) {
 async function persistDay(key, plans) {
   const sorted = sortPlans(plans);
   const oldPlans = allEvents[key] || [];
+  const wasSuccess = isSuccessDay(key);
   allEvents[key] = sorted;
   const stored = LS.get('fc_events', {});
   if (sorted.length === 0) delete stored[key]; else stored[key] = sorted;
   LS.set('fc_events', stored);
   renderAll();
+  if (!wasSuccess && isSuccessDay(key)) setTimeout(() => burstConfetti(key), 80);
   if (sorted.length > 0) {
     const tiles = document.querySelectorAll('.tile.success');
     tiles.forEach(t => {
@@ -327,6 +330,12 @@ async function persistDay(key, plans) {
     });
   }
   if (gcalConnected) syncDayToGCal(key, oldPlans, sorted);
+  // Animate newly added plan row
+  if (sorted.length > oldPlans.length) {
+    const items = document.querySelectorAll('#panel .plan-item');
+    const newItem = items[items.length - 1];
+    if (newItem) { newItem.classList.remove('plan-row-new'); void newItem.offsetWidth; newItem.classList.add('plan-row-new'); }
+  }
 }
 
 function parseEventTimeForGCal(date, timeStr) {
@@ -412,7 +421,14 @@ function updateStats() {
   const fallEnd = new Date(Y, 11, 1);
   const daysToEnd = Math.max(0, Math.ceil((fallEnd - todayMidnight) / 864e5));
   const ce = document.getElementById('stat-countdown');
-  if (ce) countUp(ce, daysToEnd);
+  if (ce) {
+    countUp(ce, daysToEnd);
+    if (daysToEnd !== lastCountdownVal && lastCountdownVal >= 0) {
+      ce.classList.remove('stat-flip-anim'); void ce.offsetWidth; ce.classList.add('stat-flip-anim');
+      ce.addEventListener('animationend', () => ce.classList.remove('stat-flip-anim'), { once: true });
+    }
+    lastCountdownVal = daysToEnd;
+  }
   const gapEl = document.getElementById('gap-alert');
   if (gapEl) {
     const gaps = calcGaps();
@@ -555,7 +571,7 @@ function selectDay(key) {
   // navigate to the month containing this key
   const km = parseInt(key.split('-')[1]) - 1;
   const idx = MONTHS.findIndex(x => x.m === km);
-  if (idx >= 0) viewStart = Math.min(Math.max(idx - (idx > 0 ? 1 : 0), 0), MONTHS.length - 2);
+  if (idx >= 0) viewStart = Math.min(idx, MONTHS.length - 2);
   renderCalendar();
   renderPanel(key);
   openPanel();
@@ -727,6 +743,7 @@ function renderPanel(key) {
   </div>`;
 
   panel.innerHTML = html;
+  panel.classList.remove('panel-fade'); void panel.offsetWidth; panel.classList.add('panel-fade');
   attachPanelEvents(key, plans, past);
 }
 
@@ -959,6 +976,30 @@ async function generateRecap(panel) {
     }
   } catch (e) { div.textContent = `Error: ${e.message}`; }
   if (recapBtn) { recapBtn.disabled = false; recapBtn.textContent = '↻ Regenerate Recap'; }
+}
+
+// ── Confetti ──────────────────────────────────────────────────
+function burstConfetti(key) {
+  const tiles = document.querySelectorAll('.tile');
+  let tile = null;
+  tiles.forEach(t => { if (t.querySelector('.dn')?.textContent === String(parseInt(key.slice(8)))) tile = t; });
+  if (!tile) return;
+  const COLORS = ['#5EBF8A','#E8884A','#B07FD8','#E87878','#78AADC','#c8a84b'];
+  for (let i = 0; i < 22; i++) {
+    const el = document.createElement('div');
+    el.className = 'confetti-particle';
+    el.style.cssText = `
+      background:${COLORS[i % COLORS.length]};
+      left:${40 + Math.random() * 20}%;top:${40 + Math.random() * 20}%;
+      --dx:${(Math.random() - 0.5) * 60}px;
+      --dy:${-20 - Math.random() * 50}px;
+      --dr:${(Math.random() - 0.5) * 360}deg;
+      animation-duration:${0.5 + Math.random() * 0.4}s;
+      animation-delay:${Math.random() * 120}ms;
+    `;
+    tile.appendChild(el);
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+  }
 }
 
 // ── Weather ───────────────────────────────────────────────────
@@ -1313,7 +1354,7 @@ function renderFriendsBoard() {
       const ds = d.daysSince;
       const label = ds < 14 ? '1 week' : ds < 21 ? '2 weeks' : ds < 30 ? '3 weeks' : `${Math.round(ds / 7)} weeks`;
       const urgency = ds > 21 ? 'rgba(232,136,74,0.85)' : 'rgba(200,168,75,0.75)';
-      html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+      html += `<div class="overdue-pulse" style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:7px">
           <div style="width:8px;height:8px;border-radius:50%;background:${f.color};flex-shrink:0"></div>
           <div style="font-size:11px;font-weight:600;color:var(--ink)">${f.name}</div>
@@ -1680,6 +1721,14 @@ function renderInsights() {
   html += `</div>`;
 
   panel.innerHTML = html;
+  // Stagger-animate each top-level insights section
+  const insightsFlex = panel.querySelector('[style*="flex-direction:column"]');
+  if (insightsFlex) {
+    [...insightsFlex.children].forEach((el, i) => {
+      el.classList.add('insights-section');
+      el.style.animationDelay = `${i * 45}ms`;
+    });
+  }
 
   panel.querySelectorAll('.free-window-card, .golden-open').forEach(card => {
     card.addEventListener('click', () => selectDay(card.dataset.key));
@@ -1687,10 +1736,12 @@ function renderInsights() {
 
   panel.querySelectorAll('.bucket-check').forEach(cb => {
     cb.addEventListener('change', () => {
+      const label = cb.closest('label');
+      if (label) { label.classList.remove('bucket-check-pop'); void label.offsetWidth; label.classList.add('bucket-check-pop'); }
       const items = getBucketList();
       items[parseInt(cb.dataset.i)].checked = cb.checked;
       saveBucketList(items);
-      renderInsights();
+      setTimeout(() => renderInsights(), 300);
     });
   });
   panel.querySelectorAll('.bucket-del').forEach(btn => {
@@ -1853,7 +1904,7 @@ function velocitySparklineHtml() {
     const barH = w.count === 0 ? 2 : Math.round((w.count / max) * (H - 6)) + 2;
     const x = i * (BAR + 1), y = H - barH;
     const fill = isCur ? '#5EBF8A' : isPast ? '#5EBF8A66' : 'rgba(94,191,138,0.2)';
-    return `<rect x="${x}" y="${y}" width="${BAR}" height="${barH}" rx="1" fill="${fill}"/>`;
+    return `<rect x="${x}" y="${y}" width="${BAR}" height="${barH}" rx="1" fill="${fill}" style="transform-box:fill-box;transform-origin:50% 100%;animation:bar-grow 0.45s ease-out ${i * 18}ms both"/>`;
   }).join('');
   const moLabels = ['Sep', 'Oct', 'Nov'].map((mo, mi) => {
     const idx = weeks.findIndex(w => w.start.getMonth() === 8 + mi);
@@ -2380,6 +2431,8 @@ function openSearch() {
   const modal = document.getElementById('search-modal');
   if (!modal) return;
   modal.style.display = 'flex';
+  const inner = modal.querySelector('div');
+  if (inner) { inner.classList.remove('search-modal-inner'); void inner.offsetWidth; inner.classList.add('search-modal-inner'); }
   const inp = document.getElementById('search-inp');
   if (inp) { inp.value = ''; inp.focus(); renderSearchResults(''); }
 }

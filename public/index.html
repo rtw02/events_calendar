@@ -229,7 +229,7 @@
   .export-btn { font-size: 9.5px; font-weight: 600; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--border); background: rgba(255,255,255,0.05); color: var(--ink-3); cursor: pointer; }
   .export-btn:hover { background: rgba(255,255,255,0.10); color: var(--ink-2); }
   .gap-alert { font-size: 10px; font-weight: 600; color: var(--orange); background: rgba(232,136,74,0.12); border: 1px solid rgba(232,136,74,0.3); border-radius: 20px; padding: 2px 10px; }
-  .rain-alert { position: absolute; top: 2px; right: 2px; font-size: 11px; line-height: 1; pointer-events: none; }
+  .rain-alert { position: absolute; top: 2px; right: 2px; font-size: 11px; line-height: 1; pointer-events: none; animation: drip 1.8s ease-in-out infinite; }
   .note-dot { position: absolute; top: 3px; left: 3px; width: 5px; height: 5px; border-radius: 50%; background: rgba(200,168,75,0.7); pointer-events: none; }
   .stat-countdown { opacity: 0.65; }
   .search-result { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background .1s; }
@@ -267,6 +267,71 @@
 
   /* ── TOD Heatmap ─────────────────────────────────────── */
   .tod-grid { display: grid; gap: 1.5px; }
+
+  /* ── Animations ──────────────────────────────────────── */
+  /* Panel content fade */
+  @keyframes panel-fade-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+  .panel-fade { animation: panel-fade-in 0.2s ease-out; }
+
+  /* Plan row slide-in */
+  @keyframes row-in { from { opacity: 0; transform: translateY(-7px); } to { opacity: 1; transform: translateY(0); } }
+  .plan-row-new { animation: row-in 0.22s ease-out; }
+
+  /* Search modal scale-in */
+  @keyframes search-in { from { opacity: 0; transform: scale(0.93) translateY(-8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  .search-modal-inner { animation: search-in 0.18s cubic-bezier(0.34,1.56,0.64,1); }
+
+  /* Rain alert drip */
+  @keyframes drip { 0%,100% { transform: translateY(0); } 55% { transform: translateY(3px); } }
+
+  /* Overdue friend pulse */
+  @keyframes overdue-pulse { 0%,100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 4px rgba(232,136,74,0.22); } }
+  .overdue-pulse { border-radius: 8px; animation: overdue-pulse 2.2s ease-in-out infinite; }
+
+  /* Streak flicker */
+  @keyframes flicker {
+    0%,100% { transform: scale(1) rotate(0deg); filter: brightness(1); }
+    20%      { transform: scale(1.14) rotate(-2deg); filter: brightness(1.35); }
+    45%      { transform: scale(0.95) rotate(1deg); filter: brightness(0.85); }
+    65%      { transform: scale(1.09) rotate(-1deg); filter: brightness(1.2); }
+    85%      { transform: scale(0.98); filter: brightness(1.05); }
+  }
+  #stat-streak.streak-fire { display: inline-block; animation: flicker 1.4s ease-in-out infinite; }
+
+  /* Weather badge shimmer */
+  .wx-badge { position: relative; overflow: hidden; }
+  .wx-badge::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.11) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer-sweep 3s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes shimmer-sweep { 0% { background-position: -100% 0; } 100% { background-position: 200% 0; } }
+
+  /* Bucket list check pop */
+  @keyframes check-pop { 0% { transform: scale(1); } 35% { transform: scale(0.84); } 68% { transform: scale(1.16); } 100% { transform: scale(1); } }
+  .bucket-check-pop { animation: check-pop 0.28s ease-out; }
+
+  /* Sparkline bars grow up */
+  @keyframes bar-grow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+
+  /* Stat flip */
+  @keyframes stat-flip { 0% { transform: rotateX(80deg); opacity: 0; } 100% { transform: rotateX(0deg); opacity: 1; } }
+  .stat-flip-anim { display: inline-block; animation: stat-flip 0.32s ease-out; transform-origin: top center; }
+
+  /* Confetti particle */
+  @keyframes confetti-fly {
+    0%   { transform: translate(0,0) rotate(0deg); opacity: 1; }
+    100% { transform: translate(var(--dx), var(--dy)) rotate(var(--dr)); opacity: 0; }
+  }
+  .confetti-particle { position: absolute; width: 5px; height: 5px; border-radius: 1px; pointer-events: none; animation: confetti-fly 0.7s ease-out forwards; }
+
+  /* Insights section stagger */
+  @keyframes section-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .insights-section { animation: section-in 0.25s ease-out both; }
 </style>
 </head>
 <body>
